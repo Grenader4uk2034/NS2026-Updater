@@ -16,6 +16,10 @@ android.accept_sdk_license = True
 android.permissions = INTERNET
 android.private_storage = True
 
+# Use python-for-android fix for corrupted temporary pip venv
+p4a.branch = develop
+p4a.commit = 0382d27
+
 [buildozer]
 log_level = 2
 warn_on_root = 1
