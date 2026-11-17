@@ -1,4 +1,4 @@
-﻿name: Build Android APK
+name: Build Android APK
 
 on:
   workflow_dispatch:
@@ -34,12 +34,135 @@ jobs:
           python -m pip install --upgrade pip
           pip install buildozer cython==0.29.33
 
-      - name: Build APK
-        run: buildozer android debug
+      - name: Build APK and save full log
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          buildozer android debug 2>&1 | tee build.log
+          status=${PIPESTATUS[0]}
+          echo "$status" > build-exit-code.txt
+          exit "$status"
+
+      - name: Create diagnostic report
+        if: always()
+        shell: bash
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          log_path = Path("build.log")
+          report_path = Path("DIAGNOSTIC_REPORT.txt")
+
+          if not log_path.exists():
+              report_path.write_text(
+                  "Build log was not created.\n",
+                  encoding="utf-8"
+              )
+              raise SystemExit(0)
+
+          lines = log_path.read_text(
+              encoding="utf-8",
+              errors="replace"
+          ).splitlines()
+
+          patterns = [
+              re.compile(r"fatal error:", re.I),
+              re.compile(r"\berror:", re.I),
+              re.compile(r"Traceback \(most recent call last\)", re.I),
+              re.compile(r"\bException\b", re.I),
+              re.compile(r"BUILD FAILED", re.I),
+              re.compile(r"Command failed", re.I),
+              re.compile(r"CalledProcessError", re.I),
+              re.compile(r"subprocess\.C?alledProcessError", re.I),
+          ]
+
+          matches = []
+
+          for i, line in enumerate(lines):
+              if any(p.search(line) for p in patterns):
+                  # This is a known non-fatal Buildozer wheel check.
+                  if (
+                      "No matching distribution found" in line
+                      or "Could not find a version that satisfies" in line
+                  ):
+                      continue
+                  matches.append(i)
+
+          report = []
+          report.append("NS2026 UPDATER - BUILD DIAGNOSTICS")
+          report.append("=" * 50)
+          report.append(f"Total log lines: {len(lines)}")
+
+          exit_file = Path("build-exit-code.txt")
+          if exit_file.exists():
+              report.append(
+                  f"Build exit code: {exit_file.read_text().strip()}"
+              )
+
+          report.append("")
+
+          if matches:
+              first = matches[0]
+              report.append(
+                  f"FIRST ERROR-LIKE MESSAGE: line {first + 1}"
+              )
+              report.append("-" * 50)
+
+              start = max(0, first - 10)
+              end = min(len(lines), first + 16)
+
+              for number in range(start, end):
+                  report.append(
+                      f"{number + 1}: {lines[number]}"
+                  )
+
+              report.append("")
+              report.append(
+                  f"Total error-like matches: {len(matches)}"
+              )
+          else:
+              report.append(
+                  "No recognized error marker was found."
+              )
+              report.append(
+                  "Showing the final 120 log lines instead."
+              )
+
+          report.append("")
+          report.append("=" * 50)
+          report.append("END OF DIAGNOSTIC REPORT")
+          report.append("")
+          report.append("FINAL LOG SECTION")
+          report.append("-" * 50)
+
+          for number in range(max(0, len(lines) - 120), len(lines)):
+              report.append(f"{number + 1}: {lines[number]}")
+
+          report_path.write_text(
+              "\n".join(report),
+              encoding="utf-8"
+          )
+
+          print(report_path.read_text(encoding="utf-8"))
+          PY
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: NS2026-Updater-APK
           path: bin/*.apk
           if-no-files-found: error
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NS2026-Build-Diagnostics
+          path: |
+            DIAGNOSTIC_REPORT.txt
+            build.log
+            build-exit-code.txt
+          if-no-files-found: warn
