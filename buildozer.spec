@@ -1,4 +1,4 @@
-﻿[app]
+[app]
 title = NS2026 Updater
 package.name = ns2026updater
 package.domain = org.ns2026
