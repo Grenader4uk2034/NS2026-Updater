@@ -4,9 +4,9 @@ package.name = ns2026updater
 package.domain = org.ns2026
 source.dir = app
 source.include_exts = py,png,jpg,kv,atlas,json
-version = 0.2
-android.numeric_version = 2
-requirements = python3,kivy,filetype
+version = 0.3
+android.numeric_version = 3
+requirements = python3,kivy,filetype,pyjnius
 orientation = portrait
 fullscreen = 0
 
