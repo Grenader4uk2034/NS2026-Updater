@@ -216,7 +216,119 @@ class UpdaterApp(App):
             self._set_status("Не удалось сохранить доступ: " + str(exc))
 
     def install_updates(self, instance):
-        self._set_status("Для установки потребуется реализация записи через Android SAF.")
+        if self.busy or not self.tree_uri or not self._all_assets_cached():
+            return
+        self._set_busy(True)
+        self.progress.value = 0
+        self._set_status("Установка архивов в выбранную папку…")
+        threading.Thread(target=self._install_worker, daemon=True).start()
+
+    def _install_worker(self):
+        try:
+            from jnius import autoclass, jarray
+            Uri = autoclass("android.net.Uri")
+            Docs = autoclass("android.provider.DocumentsContract")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            FileInputStream = autoclass("java.io.FileInputStream")
+            activity = PythonActivity.mActivity
+            resolver = activity.getContentResolver()
+            tree = Uri.parse(self.tree_uri)
+            tree_id = Docs.getTreeDocumentId(tree)
+            parent = Docs.buildDocumentUriUsingTree(tree, tree_id)
+
+            def find_child(filename):
+                cursor = resolver.query(parent, None, None, None, None)
+                if cursor is None:
+                    raise RuntimeError("Не удалось прочитать выбранную папку.")
+                try:
+                    name_col = cursor.getColumnIndex(Docs.Document.COLUMN_DISPLAY_NAME)
+                    id_col = cursor.getColumnIndex(Docs.Document.COLUMN_DOCUMENT_ID)
+                    while cursor.moveToNext():
+                        if cursor.getString(name_col) == filename:
+                            return Docs.buildDocumentUriUsingTree(tree, cursor.getString(id_col))
+                finally:
+                    cursor.close()
+                return None
+
+            for index, name in enumerate(REQUIRED_ASSETS):
+                asset = self.assets[name]
+                local_path = os.path.join(self.download_dir, name)
+                if not self._is_cached(asset):
+                    raise RuntimeError("Архив не прошёл проверку: " + name)
+
+                temp_name = "." + name + ".ns2026.tmp"
+                stale = find_child(temp_name)
+                if stale is not None:
+                    Docs.deleteDocument(resolver, stale)
+                temp_uri = Docs.createDocument(
+                    resolver, parent, "application/octet-stream", temp_name
+                )
+                if temp_uri is None:
+                    raise RuntimeError("Не удалось создать временный файл: " + name)
+
+                output = resolver.openOutputStream(temp_uri, "w")
+                if output is None:
+                    raise RuntimeError("Нет доступа на запись: " + name)
+                source = FileInputStream(local_path)
+                copied = 0
+                try:
+                    buffer = jarray("b")([0] * 65536)
+                    while True:
+                        count = source.read(buffer)
+                        if count < 0:
+                            break
+                        output.write(buffer, 0, count)
+                        copied += count
+                    output.flush()
+                finally:
+                    source.close()
+                    output.close()
+
+                if copied != int(asset["size"]):
+                    raise RuntimeError("Размер после копирования не совпал: " + name)
+
+                old_uri = find_child(name)
+                backup_uri = None
+                backup_name = name + ".ns2026.bak"
+                if old_uri is not None:
+                    stale_backup = find_child(backup_name)
+                    if stale_backup is not None:
+                        Docs.deleteDocument(resolver, stale_backup)
+                    backup_uri = Docs.renameDocument(resolver, old_uri, backup_name)
+                    if backup_uri is None:
+                        raise RuntimeError("Не удалось сохранить прежний архив: " + name)
+
+                installed_uri = Docs.renameDocument(resolver, temp_uri, name)
+                if installed_uri is None:
+                    if backup_uri is not None:
+                        Docs.renameDocument(resolver, backup_uri, name)
+                    raise RuntimeError("Не удалось завершить установку: " + name)
+                if backup_uri is not None:
+                    Docs.deleteDocument(resolver, backup_uri)
+
+                percent = (index + 1) * 100.0 / len(REQUIRED_ASSETS)
+                Clock.schedule_once(
+                    lambda dt, p=percent, n=name: self._install_progress(p, n), 0
+                )
+            Clock.schedule_once(lambda dt: self._install_done(), 0)
+        except Exception as exc:
+            error = str(exc)
+            Clock.schedule_once(lambda dt, e=error: self._install_failed(e), 0)
+
+    def _install_progress(self, percent, name):
+        self.progress.value = percent
+        self._set_status("Установлен: " + name)
+
+    def _install_done(self):
+        self.progress.value = 100
+        self._set_status("Готово. Три архива установлены в папку игры.")
+        self._set_busy(False)
+        self._refresh_folder_ui()
+
+    def _install_failed(self, error):
+        self._set_status("Ошибка установки: " + error)
+        self._set_busy(False)
+        self._refresh_folder_ui()
 
     def _fit_label(self, widget, size):
         widget.text_size = (size[0] - dp(12), None)
