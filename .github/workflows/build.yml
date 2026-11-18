@@ -51,7 +51,8 @@ jobs:
             chmod 600 "$HOME/.android/debug.keystore"
             echo "Persistent Android signing key restored."
           else
-            echo "::warning::ANDROID_DEBUG_KEYSTORE_BASE64 is not configured; this APK will use a temporary signing key and will not support signature-preserving updates."
+            echo "::error::Add the ANDROID_DEBUG_KEYSTORE_BASE64 repository secret before building."
+            exit 1
           fi
 
       - name: Build APK and save full log
