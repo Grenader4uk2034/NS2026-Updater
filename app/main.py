@@ -330,17 +330,38 @@ class UpdaterApp(App):
                         "Уже существует резервная копия " + backup_name
                         + ". Она сохранена; автоматическая установка остановлена."
                     )
-                backups[name] = rename_checked(
-                    old_uri, backup_name, "Не удалось сохранить прежний архив " + name
-                )
+                backup_uri = Docs.renameDocument(resolver, old_uri, backup_name)
+                if backup_uri is None:
+                    raise RuntimeError(
+                        "Не удалось сохранить прежний архив " + name
+                        + ": провайдер не поддержал переименование."
+                    )
+                # Record the backup immediately so even a later query failure
+                # cannot leave the original stranded under its backup name.
+                backups[name] = backup_uri
+                if find_child(backup_name) is None:
+                    raise RuntimeError(
+                        "Резервная копия не найдена после переименования: " + backup_name
+                    )
 
             # Phase 3: promote staged files. Track each success for rollback.
             for index, name in enumerate(REQUIRED_ASSETS):
-                installed_uri = rename_checked(
-                    staged[name]["uri"], name, "Не удалось установить " + name
+                installed_uri = Docs.renameDocument(
+                    resolver, staged[name]["uri"], name
                 )
+                if installed_uri is None:
+                    raise RuntimeError(
+                        "Не удалось установить " + name
+                        + ": провайдер не поддержал переименование."
+                    )
+                # Record promotion before querying the provider, so rollback
+                # can remove the new file even if the subsequent query fails.
                 staged[name]["installed_uri"] = installed_uri
                 promoted.append(name)
+                if find_child(name) is None:
+                    raise RuntimeError(
+                        "Файл не найден после установки: " + name
+                    )
                 percent = 35.0 + (index + 1) * 65.0 / len(REQUIRED_ASSETS)
                 Clock.schedule_once(
                     lambda dt, p=percent, n=name:
