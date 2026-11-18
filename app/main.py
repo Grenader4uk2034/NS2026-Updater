@@ -339,7 +339,7 @@ class UpdaterApp(App):
     def _set_busy(self, value):
         self.busy = value
         self.check_button.disabled = value
-        self.download_button.disabled = value or not self.assets
+        self.download_button.disabled = value or not any(not item.get("downloaded") for item in self.assets.values())
         self.folder_button.disabled = value
         self.install_button.disabled = value or not self.tree_uri or not self._all_assets_cached()
 
