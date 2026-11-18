@@ -241,8 +241,8 @@ class UpdaterApp(App):
                 if cursor is None:
                     raise RuntimeError("Не удалось прочитать выбранную папку.")
                 try:
-                    name_col = cursor.getColumnIndex(Docs.Document.COLUMN_DISPLAY_NAME)
-                    id_col = cursor.getColumnIndex(Docs.Document.COLUMN_DOCUMENT_ID)
+                    name_col = cursor.getColumnIndex("_display_name")
+                    id_col = cursor.getColumnIndex("document_id")
                     while cursor.moveToNext():
                         if cursor.getString(name_col) == filename:
                             return Docs.buildDocumentUriUsingTree(tree, cursor.getString(id_col))
