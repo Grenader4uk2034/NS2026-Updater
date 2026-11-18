@@ -5,7 +5,7 @@ package.domain = org.ns2026
 source.dir = app
 source.include_exts = py,png,jpg,kv,atlas,json
 version = 0.1
-requirements = python3,kivy
+requirements = python3,kivy,filetype
 orientation = portrait
 fullscreen = 0
 
