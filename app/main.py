@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 import threading
 import urllib.error
 import urllib.request
@@ -69,7 +70,7 @@ class UpdaterApp(App):
         )
 
         heading = Label(
-            text="[b]S.T.A.L.K.E.R.[/b]\n[ color=9aaa85]НАРОДНАЯ СОЛЯНКА 2026[/color]",
+            text="[b]S.T.A.L.K.E.R.[/b]\n[color=9aaa85]НАРОДНАЯ СОЛЯНКА 2026[/color]",
             markup=True,
             font_size="23sp",
             halign="center",
@@ -310,6 +311,16 @@ class UpdaterApp(App):
         completed_bytes = 0
 
         try:
+            free_bytes = shutil.disk_usage(self.download_dir).free
+            safety_margin = 100 * 1024 * 1024
+            if free_bytes < total_bytes + safety_margin:
+                raise RuntimeError(
+                    "Недостаточно свободного места. Нужно примерно {}, доступно {}.".format(
+                        format_size(total_bytes + safety_margin),
+                        format_size(free_bytes),
+                    )
+                )
+
             for name, asset in pending:
                 target = os.path.join(self.download_dir, name)
                 temporary = target + ".part"
