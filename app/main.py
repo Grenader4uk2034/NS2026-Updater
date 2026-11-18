@@ -313,6 +313,40 @@ class UpdaterApp(App):
                 if copied != int(asset["size"]):
                     raise RuntimeError("Размер после копирования не совпал: " + name)
 
+                # Read the staged document back through SAF and verify the
+                # bytes actually stored by the document provider.
+                expected_digest = (asset.get("digest") or "").lower()
+                if expected_digest.startswith("sha256:"):
+                    verify_stream = resolver.openInputStream(temp_uri)
+                    if verify_stream is None:
+                        raise RuntimeError("Не удалось проверить записанный файл: " + name)
+                    verified_digest = hashlib.sha256()
+                    verified_size = 0
+                    try:
+                        verify_buffer = jarray("b")([0] * 65536)
+                        while True:
+                            count = verify_stream.read(verify_buffer)
+                            if count < 0:
+                                break
+                            verified_digest.update(bytes(
+                                (int(verify_buffer[i]) & 0xff)
+                                for i in range(count)
+                            ))
+                            verified_size += count
+                    finally:
+                        verify_stream.close()
+
+                    if verified_size != int(asset["size"]):
+                        raise RuntimeError(
+                            "Размер файла в папке игры не совпал после записи: " + name
+                        )
+                    actual_digest = verified_digest.hexdigest().lower()
+                    expected_hex = expected_digest.split(":", 1)[1]
+                    if actual_digest != expected_hex:
+                        raise RuntimeError(
+                            "SHA-256 записанного файла не совпал: " + name
+                        )
+
                 percent = (index + 1) * 35.0 / len(REQUIRED_ASSETS)
                 Clock.schedule_once(
                     lambda dt, p=percent, n=name:
