@@ -417,6 +417,15 @@ class UpdaterApp(App):
         self._set_busy(False)
         self._refresh_folder_ui()
 
+    def _install_done_with_backups(self, files):
+        self.progress.value = 100
+        self._set_status(
+            "Все три архива установлены. Старые копии сохранены: "
+            + files + ". Удалите их вручную после проверки игры."
+        )
+        self._set_busy(False)
+        self._refresh_folder_ui()
+
     def _install_failed(self, error):
         self._set_status("Ошибка установки: " + error)
         self._set_busy(False)
