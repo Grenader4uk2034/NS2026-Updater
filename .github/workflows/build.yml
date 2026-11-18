@@ -6,9 +6,15 @@ on:
     branches:
       - main
 
+# Keep only the newest source revision building; older APK jobs waste runners.
+concurrency:
+  group: ns2026-android-apk-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 120
 
     steps:
       - name: Checkout source
