@@ -224,6 +224,14 @@ class UpdaterApp(App):
         threading.Thread(target=self._install_worker, daemon=True).start()
 
     def _install_worker(self):
+        """Stage every archive first; keep all backups until every promotion succeeds."""
+        from_uri = None
+        staged = {}
+        backups = {}
+        promoted = []
+        resolver = None
+        Docs = None
+
         try:
             from jnius import autoclass, jarray
             Uri = autoclass("android.net.Uri")
@@ -243,13 +251,27 @@ class UpdaterApp(App):
                 try:
                     name_col = cursor.getColumnIndex("_display_name")
                     id_col = cursor.getColumnIndex("document_id")
+                    if name_col < 0 or id_col < 0:
+                        raise RuntimeError("Провайдер папки не вернул имя или ID файла.")
                     while cursor.moveToNext():
                         if cursor.getString(name_col) == filename:
-                            return Docs.buildDocumentUriUsingTree(tree, cursor.getString(id_col))
+                            return Docs.buildDocumentUriUsingTree(
+                                tree, cursor.getString(id_col)
+                            )
                 finally:
                     cursor.close()
                 return None
 
+            def rename_checked(uri, new_name, description):
+                renamed = Docs.renameDocument(resolver, uri, new_name)
+                if renamed is None:
+                    raise RuntimeError(description + ": провайдер не поддержал переименование.")
+                result = find_child(new_name)
+                if result is None:
+                    raise RuntimeError(description + ": файл после переименования не найден.")
+                return result
+
+            # Phase 1: copy and size-check all new files without touching originals.
             for index, name in enumerate(REQUIRED_ASSETS):
                 asset = self.assets[name]
                 local_path = os.path.join(self.download_dir, name)
@@ -257,15 +279,18 @@ class UpdaterApp(App):
                     raise RuntimeError("Архив не прошёл проверку: " + name)
 
                 temp_name = "." + name + ".ns2026.tmp"
-                stale = find_child(temp_name)
-                if stale is not None:
-                    Docs.deleteDocument(resolver, stale)
+                if find_child(temp_name) is not None:
+                    raise RuntimeError(
+                        "Найден временный файл от предыдущей установки: " + temp_name
+                        + ". Удалите его вручную или выберите папку без старых временных файлов."
+                    )
                 temp_uri = Docs.createDocument(
                     resolver, parent, "application/octet-stream", temp_name
                 )
                 if temp_uri is None:
                     raise RuntimeError("Не удалось создать временный файл: " + name)
 
+                staged[name] = {"uri": temp_uri, "temp_name": temp_name}
                 output = resolver.openOutputStream(temp_uri, "w")
                 if output is None:
                     raise RuntimeError("Нет доступа на запись: " + name)
@@ -287,32 +312,99 @@ class UpdaterApp(App):
                 if copied != int(asset["size"]):
                     raise RuntimeError("Размер после копирования не совпал: " + name)
 
-                old_uri = find_child(name)
-                backup_uri = None
-                backup_name = name + ".ns2026.bak"
-                if old_uri is not None:
-                    stale_backup = find_child(backup_name)
-                    if stale_backup is not None:
-                        Docs.deleteDocument(resolver, stale_backup)
-                    backup_uri = Docs.renameDocument(resolver, old_uri, backup_name)
-                    if backup_uri is None:
-                        raise RuntimeError("Не удалось сохранить прежний архив: " + name)
-
-                installed_uri = Docs.renameDocument(resolver, temp_uri, name)
-                if installed_uri is None:
-                    if backup_uri is not None:
-                        Docs.renameDocument(resolver, backup_uri, name)
-                    raise RuntimeError("Не удалось завершить установку: " + name)
-                if backup_uri is not None:
-                    Docs.deleteDocument(resolver, backup_uri)
-
-                percent = (index + 1) * 100.0 / len(REQUIRED_ASSETS)
+                percent = (index + 1) * 35.0 / len(REQUIRED_ASSETS)
                 Clock.schedule_once(
-                    lambda dt, p=percent, n=name: self._install_progress(p, n), 0
+                    lambda dt, p=percent, n=name:
+                        self._install_progress(p, "Подготовлен: " + n), 0
                 )
-            Clock.schedule_once(lambda dt: self._install_done(), 0)
+
+            # Phase 2: move every existing original to a backup. Do not delete
+            # any backup until all three new archives have been promoted.
+            for name in REQUIRED_ASSETS:
+                old_uri = find_child(name)
+                if old_uri is None:
+                    continue
+                backup_name = name + ".ns2026.bak"
+                if find_child(backup_name) is not None:
+                    raise RuntimeError(
+                        "Уже существует резервная копия " + backup_name
+                        + ". Она сохранена; автоматическая установка остановлена."
+                    )
+                backups[name] = rename_checked(
+                    old_uri, backup_name, "Не удалось сохранить прежний архив " + name
+                )
+
+            # Phase 3: promote staged files. Track each success for rollback.
+            for index, name in enumerate(REQUIRED_ASSETS):
+                installed_uri = rename_checked(
+                    staged[name]["uri"], name, "Не удалось установить " + name
+                )
+                staged[name]["installed_uri"] = installed_uri
+                promoted.append(name)
+                percent = 35.0 + (index + 1) * 65.0 / len(REQUIRED_ASSETS)
+                Clock.schedule_once(
+                    lambda dt, p=percent, n=name:
+                        self._install_progress(p, "Установлен: " + n), 0
+                )
+
+            # Commit point: only now may backups be removed.
+            cleanup_errors = []
+            for name, backup_uri in backups.items():
+                try:
+                    if not Docs.deleteDocument(resolver, backup_uri):
+                        cleanup_errors.append(name + ".ns2026.bak")
+                except Exception:
+                    cleanup_errors.append(name + ".ns2026.bak")
+
+            if cleanup_errors:
+                Clock.schedule_once(
+                    lambda dt, files=", ".join(cleanup_errors):
+                        self._install_done_with_backups(files), 0
+                )
+            else:
+                Clock.schedule_once(lambda dt: self._install_done(), 0)
+
         except Exception as exc:
+            rollback_errors = []
+            if resolver is not None and Docs is not None:
+                # Remove newly installed files first, then restore every original.
+                for name in reversed(promoted):
+                    try:
+                        current = find_child(name)
+                        if current is not None and not Docs.deleteDocument(resolver, current):
+                            rollback_errors.append("не удалось удалить новый " + name)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(name + ": " + str(rollback_exc))
+
+                for name, backup_uri in reversed(list(backups.items())):
+                    try:
+                        if find_child(name) is not None:
+                            rollback_errors.append(
+                                "оригинал " + name + " уже существует; резервная копия сохранена"
+                            )
+                            continue
+                        rename_checked(
+                            backup_uri, name, "Не удалось восстановить " + name
+                        )
+                    except Exception as rollback_exc:
+                        rollback_errors.append(name + ": " + str(rollback_exc))
+
+                # Remove only temporary files; never delete backups on failure.
+                for name, info in staged.items():
+                    try:
+                        if name not in promoted:
+                            temp_uri = find_child(info["temp_name"])
+                            if temp_uri is not None:
+                                Docs.deleteDocument(resolver, temp_uri)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(
+                            "временный файл " + name + ": " + str(rollback_exc)
+                        )
+
             error = str(exc)
+            if rollback_errors:
+                error += "\\nОШИБКИ ОТКАТА: " + "; ".join(rollback_errors)
+                error += "\\nРезервные копии .ns2026.bak не удаляйте."
             Clock.schedule_once(lambda dt, e=error: self._install_failed(e), 0)
 
     def _install_progress(self, percent, name):
