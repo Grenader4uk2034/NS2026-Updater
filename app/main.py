@@ -243,9 +243,10 @@ class UpdaterApp(App):
             tree = Uri.parse(self.tree_uri)
             tree_id = Docs.getTreeDocumentId(tree)
             parent = Docs.buildDocumentUriUsingTree(tree, tree_id)
+            children_uri = Docs.buildChildDocumentsUriUsingTree(tree, tree_id)
 
             def find_child(filename):
-                cursor = resolver.query(parent, None, None, None, None)
+                cursor = resolver.query(children_uri, None, None, None, None)
                 if cursor is None:
                     raise RuntimeError("Не удалось прочитать выбранную папку.")
                 try:
