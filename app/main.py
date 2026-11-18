@@ -58,10 +58,18 @@ class UpdaterApp(App):
         self.release = None
         self.assets = {}
         self.busy = False
+        self.tree_uri = None
+        self.request_tree_code = 701
         self.download_dir = os.path.join(self.user_data_dir, "updates")
         os.makedirs(self.download_dir, exist_ok=True)
 
         Window.clearcolor = (0.035, 0.045, 0.04, 1)
+        self._load_selected_tree()
+        try:
+            from android import activity
+            activity.bind(on_activity_result=self.on_activity_result)
+        except Exception:
+            pass
 
         root = BoxLayout(
             orientation="vertical",
@@ -112,6 +120,14 @@ class UpdaterApp(App):
         self.progress = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(8))
         root.add_widget(self.progress)
 
+        self.folder_button = Button(text="ВЫБРАТЬ ПАПКУ ИГРЫ", size_hint_y=None, height=dp(48))
+        self.folder_button.bind(on_press=self.choose_game_folder)
+        root.add_widget(self.folder_button)
+
+        self.install_button = Button(text="УСТАНОВИТЬ В ПАПКУ ИГРЫ", size_hint_y=None, height=dp(54), disabled=True)
+        self.install_button.bind(on_press=self.install_updates)
+        root.add_widget(self.install_button)
+
         self.check_button = Button(
             text="ПРОВЕРИТЬ ОБНОВЛЕНИЯ",
             size_hint_y=None,
@@ -136,7 +152,7 @@ class UpdaterApp(App):
         root.add_widget(self.download_button)
 
         self.footer = Label(
-            text="Файлы будут сохранены в хранилище приложения",
+            text="Сначала выберите папку игры",
             color=(0.58, 0.62, 0.56, 1),
             font_size="11sp",
             size_hint_y=None,
@@ -145,7 +161,62 @@ class UpdaterApp(App):
         root.add_widget(self.footer)
 
         self._render_assets()
+        self._refresh_folder_ui()
         return root
+
+    def _load_selected_tree(self):
+        path = os.path.join(self.user_data_dir, "game_tree_uri.txt")
+        try:
+            with open(path, "r", encoding="utf-8") as source:
+                self.tree_uri = source.read().strip() or None
+        except OSError:
+            self.tree_uri = None
+
+    def _all_assets_cached(self):
+        return bool(self.assets) and all(item.get("downloaded") for item in self.assets.values())
+
+    def _refresh_folder_ui(self):
+        if hasattr(self, "footer"):
+            self.footer.text = "Папка игры выбрана. Доступ сохранён." if self.tree_uri else "Папка игры не выбрана"
+        if hasattr(self, "install_button"):
+            self.install_button.disabled = self.busy or not self.tree_uri or not self._all_assets_cached()
+
+    def choose_game_folder(self, instance):
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
+            PythonActivity.mActivity.startActivityForResult(intent, self.request_tree_code)
+            self._set_status("Выберите папку с игровыми архивами.")
+        except Exception as exc:
+            self._set_status("Не удалось открыть выбор папки: " + str(exc))
+
+    def on_activity_result(self, request_code, result_code, intent):
+        if request_code != self.request_tree_code or result_code != -1 or intent is None:
+            return
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            uri = intent.getData()
+            if uri is None:
+                raise RuntimeError("Android не вернул выбранную папку.")
+            flags = intent.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            activity.getContentResolver().takePersistableUriPermission(uri, flags)
+            self.tree_uri = str(uri.toString())
+            with open(os.path.join(self.user_data_dir, "game_tree_uri.txt"), "w", encoding="utf-8") as target:
+                target.write(self.tree_uri)
+            self._refresh_folder_ui()
+            self._set_status("Папка игры выбрана. Доступ сохранён.")
+        except Exception as exc:
+            self.tree_uri = None
+            self._refresh_folder_ui()
+            self._set_status("Не удалось сохранить доступ: " + str(exc))
+
+    def install_updates(self, instance):
+        self._set_status("Для установки потребуется реализация записи через Android SAF.")
 
     def _fit_label(self, widget, size):
         widget.text_size = (size[0] - dp(12), None)
@@ -157,6 +228,8 @@ class UpdaterApp(App):
         self.busy = value
         self.check_button.disabled = value
         self.download_button.disabled = value or not self.assets
+        self.folder_button.disabled = value
+        self.install_button.disabled = value or not self.tree_uri or not self._all_assets_cached()
 
     def _render_assets(self):
         self.asset_list.clear_widgets()
