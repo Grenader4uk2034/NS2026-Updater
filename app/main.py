@@ -738,6 +738,24 @@ class UpdaterApp(App):
             assembled_size, assembled_md5 = self._saf_hash_size(resolver, assembly)
             if assembled_size != base_size:
                 raise RuntimeError("Размер общего gamedata.sq_base не совпал. Все 17 частей сохранены.")
+            # Independently hash the exact byte stream of all 17 source pieces.
+            # The assembled file must match this concatenation byte-for-byte.
+            expected_assembly_digest = hashlib.md5()
+            for part_uri in part_uris:
+                stream = resolver.openInputStream(part_uri)
+                if stream is None:
+                    raise RuntimeError("Не удалось повторно прочитать часть для итоговой проверки.")
+                buf = Array.newInstance(Byte.TYPE, 65536)
+                try:
+                    while True:
+                        n = stream.read(buf)
+                        if n < 0:
+                            break
+                        expected_assembly_digest.update(bytes((int(buf[j]) & 255) for j in range(n)))
+                finally:
+                    stream.close()
+            if expected_assembly_digest.hexdigest() != assembled_md5:
+                raise RuntimeError("Общий архив не совпадает с последовательным объединением 17 частей. Части сохранены.")
             # SAF swap: retain the previous archive as a backup until the new
             # file has been renamed and verified.
             old_base = find(folder, BASE_ASSET)
@@ -758,7 +776,13 @@ class UpdaterApp(App):
                 raise RuntimeError("Не удалось переименовать собранный архив. 17 частей сохранены.")
             final_size, final_md5 = self._saf_hash_size(resolver, final_uri)
             if final_size != base_size or final_md5 != assembled_md5:
-                self._saf_delete(resolver, Docs, final_uri)
+                if not self._saf_delete(resolver, Docs, final_uri):
+                    failed_name = "." + BASE_ASSET + ".failed"
+                    if find(folder, failed_name) is not None:
+                        failed_name = failed_name + ".2"
+                    failed_uri = Docs.renameDocument(resolver, final_uri, failed_name)
+                    if failed_uri is None:
+                        raise RuntimeError("Итоговая проверка не пройдена; новая и резервная копии оставлены, части сохранены.")
                 if backup is not None:
                     Docs.renameDocument(resolver, backup, BASE_ASSET)
                 raise RuntimeError("Проверка общего архива после сохранения не пройдена. Части сохранены.")
