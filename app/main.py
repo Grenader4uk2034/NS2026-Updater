@@ -354,7 +354,7 @@ class UpdaterApp(App):
                     actual_digest = verified_digest.hexdigest().lower()
                     if actual_digest != expected_digest:
                         raise RuntimeError(
-                            "SHA-256 записанного файла не совпал: " + name
+                            "MD5 записанного файла не совпал: " + name
                         )
 
                 percent = (index + 1) * 35.0 / len(REQUIRED_ASSETS)
@@ -683,7 +683,7 @@ class UpdaterApp(App):
                     headers={"User-Agent": "NS2026-Updater-Android"},
                 )
                 with urllib.request.urlopen(request, timeout=90, context=NETWORK_CONTEXT) as response:
-                        received = 0
+                    received = 0
                     digest = hashlib.md5()
                     with open(temporary, "wb") as output:
                         while True:
