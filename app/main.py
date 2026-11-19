@@ -5,6 +5,7 @@ import os
 import shutil
 import ssl
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -80,6 +81,19 @@ def http_open(url, accept="application/octet-stream"):
         },
     )
     return urllib.request.urlopen(request, timeout=45, context=NETWORK_CONTEXT)
+
+
+def urlopen_retry(request, timeout=120, context=NETWORK_CONTEXT, attempts=5):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            return urllib.request.urlopen(request, timeout=timeout, context=context)
+        except (OSError, urllib.error.URLError, TimeoutError) as exc:
+            last_error = exc
+            if attempt + 1 >= attempts:
+                break
+            time.sleep(min(2 ** attempt, 16))
+    raise last_error
 
 
 
@@ -349,6 +363,73 @@ class UpdaterApp(App):
             return int(cursor.getLong(col)) if col >= 0 and cursor.moveToFirst() else 0
         finally: cursor.close()
 
+    def _verification_cache_path(self):
+        return os.path.join(self.user_data_dir, "verified_files.json")
+
+    def _load_verification_cache(self):
+        try:
+            with open(self._verification_cache_path(), "r", encoding="utf-8") as source:
+                return json.load(source)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_verification_cache(self, cache):
+        path = self._verification_cache_path()
+        temp_path = path + ".tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as target:
+                json.dump(cache, target, ensure_ascii=False)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temp_path, path)
+        except OSError:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    def _saf_modified(self, resolver, uri):
+        cursor = resolver.query(uri, None, None, None, None)
+        if cursor is None:
+            return None
+        try:
+            for column_name in ("last_modified", "lastModified", "last_modified_time"):
+                column = cursor.getColumnIndex(column_name)
+                if column >= 0 and cursor.moveToFirst():
+                    value = int(cursor.getLong(column))
+                    if value > 0:
+                        return value
+            return None
+        finally:
+            cursor.close()
+
+    def _cached_verified(self, resolver, uri, name, size, expected_md5):
+        modified = self._saf_modified(resolver, uri)
+        if modified is None:
+            return False
+        entry = self._load_verification_cache().get(name, {})
+        return (
+            entry.get("uri") == str(uri)
+            and int(entry.get("size", -1)) == int(size)
+            and int(entry.get("modified", -1)) == modified
+            and entry.get("expected_md5") == expected_md5.lower()
+            and entry.get("md5") == expected_md5.lower()
+        )
+
+    def _remember_verified(self, resolver, uri, name, size, digest, expected_md5):
+        modified = self._saf_modified(resolver, uri)
+        if modified is None:
+            return
+        cache = self._load_verification_cache()
+        cache[name] = {
+            "uri": str(uri),
+            "size": int(size),
+            "modified": modified,
+            "md5": digest.lower(),
+            "expected_md5": expected_md5.lower(),
+        }
+        self._save_verification_cache(cache)
+
     def _saf_md5(self, resolver, uri, progress_callback=None):
         from jnius import autoclass
         Array = autoclass('java.lang.reflect.Array'); Byte = autoclass('java.lang.Byte')
@@ -495,21 +576,40 @@ class UpdaterApp(App):
             base_size = sum(int(item.get('size') or 0) for item in chunks)
             if base_uri is not None and os.path.isfile(state_path):
                 try:
-                    with open(state_path,'r',encoding='utf-8') as sf: saved=json.load(sf)
-                    if saved.get('complete') and saved.get('chunks_md5') == chunk_hashes and self._saf_size(resolver,base_uri) == base_size:
-                        actual=self._saf_md5(resolver,base_uri)
-                        if actual == saved.get('assembled_md5'): assembled_md5=actual
-                except Exception: assembled_md5=None
-            base_asset={'name':BASE_ASSET,'size':base_size,'chunks':chunks,'expected_md5':assembled_md5,'assembled_md5':assembled_md5,'downloaded':bool(assembled_md5)}
-            found={BASE_ASSET:base_asset}
+                    with open(state_path, "r", encoding="utf-8") as sf:
+                        saved = json.load(sf)
+                    if saved.get("complete") and saved.get("chunks_md5") == chunk_hashes and self._saf_size(resolver, base_uri) == base_size:
+                        cached_digest = saved.get("assembled_md5")
+                        if cached_digest and self._cached_verified(resolver, base_uri, BASE_ASSET, base_size, cached_digest):
+                            assembled_md5 = cached_digest
+                        else:
+                            actual = self._saf_md5(resolver, base_uri)
+                            if actual == cached_digest:
+                                assembled_md5 = actual
+                                self._remember_verified(resolver, base_uri, BASE_ASSET, base_size, actual, actual)
+                except Exception:
+                    assembled_md5 = None
+            base_asset = {"name": BASE_ASSET, "size": base_size, "chunks": chunks, "expected_md5": assembled_md5, "assembled_md5": assembled_md5, "downloaded": bool(assembled_md5)}
+            found = {BASE_ASSET: base_asset}
             for name in REQUIRED_ASSETS[1:]:
-                item=dict(release_assets[name]); item['expected_md5']=expected_hashes[name]
-                existing=find(folder,name); item['downloaded']=False
+                item = dict(release_assets[name])
+                item["expected_md5"] = expected_hashes[name]
+                existing = find(folder, name)
+                item["downloaded"] = False
                 if existing is not None:
                     try:
-                        item['downloaded']=(self._saf_size(resolver,existing)==int(item.get('size') or 0) and self._saf_md5(resolver,existing)==item['expected_md5'])
-                    except Exception: item['downloaded']=False
-                found[name]=item
+                        actual_size = self._saf_size(resolver, existing)
+                        if actual_size == int(item.get("size") or 0):
+                            if self._cached_verified(resolver, existing, name, actual_size, item["expected_md5"]):
+                                item["downloaded"] = True
+                            else:
+                                actual_md5 = self._saf_md5(resolver, existing)
+                                item["downloaded"] = actual_md5 == item["expected_md5"]
+                                if item["downloaded"]:
+                                    self._remember_verified(resolver, existing, name, actual_size, actual_md5, item["expected_md5"])
+                    except Exception:
+                        item["downloaded"] = False
+                found[name] = item
             self.release = release
             self.assets = found
             total = sum(item["size"] for item in found.values())
@@ -616,14 +716,12 @@ class UpdaterApp(App):
     
                     if offset == expected_size and expected_size > 0:
                         try:
-                            checked = [0]
-                            def report_check_progress(amount, base_done=downloaded_bytes, part_name=name, part_size=expected_size):
-                                checked[0] += amount
-                                pct = 75.0 * (base_done + checked[0]) / max(1, base_size)
-                                Clock.schedule_once(lambda dt, p=pct: self._set_progress(p), 0)
-                            part_valid = self._saf_md5(
-                                resolver, part, progress_callback=report_check_progress
-                            ).lower() == expected_hash
+                            if self._cached_verified(resolver, part, name, expected_size, expected_hash):
+                                part_valid = True
+                            else:
+                                part_valid = self._saf_md5(resolver, part).lower() == expected_hash
+                                if part_valid:
+                                    self._remember_verified(resolver, part, name, expected_size, expected_hash, expected_hash)
                         except Exception:
                             part_valid = False
                         if part_valid:
@@ -632,8 +730,7 @@ class UpdaterApp(App):
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                             continue
-                        # Reuse the same SAF document and truncate it in place.
-                        # This avoids keeping a second multi-GB recovery copy.
+                        # Invalid file is overwritten in place, never duplicated.
                         offset = 0
     
                     if offset > expected_size:
@@ -671,7 +768,7 @@ class UpdaterApp(App):
                         ), 0
                     )
                     request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                    response = urllib.request.urlopen(request, timeout=60, context=NETWORK_CONTEXT)
+                    response = urlopen_retry(request, timeout=60)
                     status_code = getattr(response, "status", response.getcode())
                     if offset and status_code != 206:
                         response.close()
@@ -682,7 +779,7 @@ class UpdaterApp(App):
                             item["browser_download_url"],
                             headers={"User-Agent": "NS2026-Updater-Android"},
                         )
-                        response = urllib.request.urlopen(request, timeout=60, context=NETWORK_CONTEXT)
+                        response = urlopen_retry(request, timeout=60)
                     Clock.schedule_once(
                         lambda dt, i=idx + 1, n=name: self._download_status(
                             "Загрузка части {}/17: {}".format(i, n)
@@ -719,6 +816,7 @@ class UpdaterApp(App):
                     raise RuntimeError("Размер части {} не совпал. Частичный файл сохранён для повторной загрузки.".format(name))
                 if digest.hexdigest().lower() != expected_hash:
                     raise RuntimeError("MD5 части {} не совпал. Повреждённая часть оставлена до следующей проверки.".format(name))
+                self._remember_verified(resolver, part, name, expected_size, expected_hash, expected_hash)
                 downloaded_bytes += expected_size
                 Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
     
@@ -734,9 +832,15 @@ class UpdaterApp(App):
                     part_uri = find(folder, "." + item["name"] + ".download")
                     if part_uri is None:
                         raise RuntimeError("Не найдена скачанная часть " + item["name"])
-                    size, digest = self._saf_hash_size(resolver, part_uri)
-                    if size != int(item.get("size") or 0) or digest.lower() != item["expected_md5"].lower():
-                        raise RuntimeError("Повторная проверка части {} не пройдена.".format(item["name"]))
+                    size = self._saf_size(resolver, part_uri)
+                    expected_hash = item["expected_md5"].lower()
+                    if size != int(item.get("size") or 0):
+                        raise RuntimeError("Повторная проверка размера части {} не пройдена.".format(item["name"]))
+                    if not self._cached_verified(resolver, part_uri, item["name"], size, expected_hash):
+                        digest = self._saf_md5(resolver, part_uri)
+                        if digest.lower() != expected_hash:
+                            raise RuntimeError("Повторная проверка части {} не пройдена.".format(item["name"]))
+                        self._remember_verified(resolver, part_uri, item["name"], size, digest, expected_hash)
                     part_uris.append(part_uri)
     
                 # Stage 2: append verified chunks into a temporary assembly. Chunks
@@ -878,6 +982,7 @@ class UpdaterApp(App):
                     "assembled_md5": assembled_md5,
                     "assembled_size": assembled_size,
                 })
+                self._remember_verified(resolver, final_uri, BASE_ASSET, final_size, final_md5, final_md5)
                 base["downloaded"] = True
                 # Cleanup is now strictly post-assembly and best effort. A SAF cleanup
                 # failure must never invalidate the successfully assembled archive.
