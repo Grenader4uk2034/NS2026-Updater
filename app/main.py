@@ -259,11 +259,13 @@ class UpdaterApp(App):
         Docs = None
 
         try:
-            from jnius import autoclass, jarray
+            from jnius import autoclass
             Uri = autoclass("android.net.Uri")
             Docs = autoclass("android.provider.DocumentsContract")
             PythonActivity = autoclass("org.kivy.android.PythonActivity")
             FileInputStream = autoclass("java.io.FileInputStream")
+            JavaArray = autoclass("java.lang.reflect.Array")
+            JavaByte = autoclass("java.lang.Byte")
             activity = PythonActivity.mActivity
             resolver = activity.getContentResolver()
             tree = Uri.parse(self.tree_uri)
@@ -338,7 +340,7 @@ class UpdaterApp(App):
                 source = FileInputStream(local_path)
                 copied = 0
                 try:
-                    buffer = jarray("b")([0] * 65536)
+                    buffer = JavaArray.newInstance(JavaByte.TYPE, 65536)
                     while True:
                         count = source.read(buffer)
                         if count < 0:
@@ -361,7 +363,7 @@ class UpdaterApp(App):
                     verified_digest = hashlib.md5()
                     verified_size = 0
                     try:
-                        verify_buffer = jarray("b")([0] * 65536)
+                        verify_buffer = JavaArray.newInstance(JavaByte.TYPE, 65536)
                         while True:
                             count = verify_stream.read(verify_buffer)
                             if count < 0:
