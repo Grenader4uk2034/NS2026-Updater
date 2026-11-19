@@ -267,7 +267,7 @@ class UpdaterApp(App):
             cursor = resolver.query(child_uri, None, None, None, None)
             if cursor is None: raise RuntimeError('Не удалось прочитать Download.')
             try:
-                ni = cursor.getColumnIndex('_display_name'); ii = cursor.getColumnIndex('document_id')
+                ni = cursor.getColumnIndex('display_name'); ii = cursor.getColumnIndex('document_id')
                 while cursor.moveToNext():
                     if cursor.getString(ni) == name:
                         return Docs.buildDocumentUriUsingTree(tree, cursor.getString(ii))
@@ -282,7 +282,7 @@ class UpdaterApp(App):
         cursor = resolver.query(uri, None, None, None, None)
         if cursor is None: return 0
         try:
-            col = cursor.getColumnIndex('_size')
+            col = cursor.getColumnIndex('size')
             return int(cursor.getLong(col)) if col >= 0 and cursor.moveToFirst() else 0
         finally: cursor.close()
 
