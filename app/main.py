@@ -568,6 +568,11 @@ class UpdaterApp(App):
                 downloaded_bytes = 0
                 for idx, item in enumerate(chunks):
                     name = item["name"]
+                    Clock.schedule_once(
+                        lambda dt, i=idx + 1, n=name: self._download_status(
+                            "Проверка части {}/17: {}".format(i, n)
+                        ), 0
+                    )
                     temp_name = "." + name + ".download"
                     part = find(folder, temp_name)
                     expected_size = int(item.get("size") or 0)
@@ -598,6 +603,11 @@ class UpdaterApp(App):
     
                     digest = hashlib.md5()
                     if offset and part is not None:
+                        Clock.schedule_once(
+                            lambda dt, i=idx + 1, n=name, size=offset: self._download_status(
+                                "Восстановление {} • проверка {} байт".format(n, size)
+                            ), 0
+                        )
                         inp = resolver.openInputStream(part)
                         if inp is None:
                             raise RuntimeError("Не удалось прочитать частично скачанную часть " + name)
@@ -614,8 +624,15 @@ class UpdaterApp(App):
                     headers = {"User-Agent": "NS2026-Updater-Android"}
                     if offset:
                         headers["Range"] = "bytes={}-".format(offset)
+                    Clock.schedule_once(
+                        lambda dt, i=idx + 1, n=name, off=offset: self._download_status(
+                            "Подключение к серверу • часть {}/17 {}{}".format(
+                                i, n, " (продолжение)" if off else ""
+                            )
+                        ), 0
+                    )
                     request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                    response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                    response = urllib.request.urlopen(request, timeout=60, context=NETWORK_CONTEXT)
                     status_code = getattr(response, "status", response.getcode())
                     if offset and status_code != 206:
                         response.close()
@@ -626,7 +643,12 @@ class UpdaterApp(App):
                             item["browser_download_url"],
                             headers={"User-Agent": "NS2026-Updater-Android"},
                         )
-                        response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                        response = urllib.request.urlopen(request, timeout=60, context=NETWORK_CONTEXT)
+                    Clock.schedule_once(
+                        lambda dt, i=idx + 1, n=name: self._download_status(
+                            "Загрузка части {}/17: {}".format(i, n)
+                        ), 0
+                    )
                     if part is None:
                         part = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
                     out = resolver.openOutputStream(part, "wa" if offset else "w")
@@ -649,6 +671,11 @@ class UpdaterApp(App):
                     finally:
                         out.close()
     
+                Clock.schedule_once(
+                    lambda dt, i=idx + 1, n=name: self._download_status(
+                        "Проверка загруженной части {}/17: {}".format(i, n)
+                    ), 0
+                )
                 if got != expected_size:
                     raise RuntimeError("Размер части {} не совпал. Частичный файл сохранён для повторной загрузки.".format(name))
                 if digest.hexdigest().lower() != expected_hash:
@@ -660,6 +687,11 @@ class UpdaterApp(App):
                 # the final archive.
                 part_uris = []
                 for idx, item in enumerate(chunks):
+                    Clock.schedule_once(
+                        lambda dt, i=idx + 1, n=item["name"]: self._download_status(
+                            "Контроль частей {}/17: {}".format(i, n)
+                        ), 0
+                    )
                     part_uri = find(folder, "." + item["name"] + ".download")
                     if part_uri is None:
                         raise RuntimeError("Не найдена скачанная часть " + item["name"])
@@ -701,6 +733,11 @@ class UpdaterApp(App):
     
                 for idx in range(next_chunk, len(chunks)):
                     item = chunks[idx]
+                    Clock.schedule_once(
+                        lambda dt, i=idx + 1, n=item["name"]: self._download_status(
+                            "Объединение частей {}/17: {}".format(i, n)
+                        ), 0
+                    )
                     inp = resolver.openInputStream(part_uris[idx])
                     out = resolver.openOutputStream(assembly, "wa" if committed else "w")
                     if inp is None or out is None:
@@ -736,13 +773,21 @@ class UpdaterApp(App):
                     Clock.schedule_once(lambda dt, p=pct, n=item["name"], r=committed: self._download_progress(p, n, r), 0)
                     Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Объединено частей: {}/17".format(i)), 0)
     
+                Clock.schedule_once(
+                    lambda dt: self._download_status("Финальная проверка общего архива…"), 0
+                )
                 assembled_size, assembled_md5 = self._saf_hash_size(resolver, assembly)
                 if assembled_size != base_size:
                     raise RuntimeError("Размер общего gamedata.sq_base не совпал. Все 17 частей сохранены.")
                 # Independently hash the exact byte stream of all 17 source pieces.
                 # The assembled file must match this concatenation byte-for-byte.
                 expected_assembly_digest = hashlib.md5()
-                for part_uri in part_uris:
+                for idx, part_uri in enumerate(part_uris):
+                    Clock.schedule_once(
+                        lambda dt, i=idx + 1: self._download_status(
+                            "Сверка общего архива с частью {}/17".format(i)
+                        ), 0
+                    )
                     stream = resolver.openInputStream(part_uri)
                     if stream is None:
                         raise RuntimeError("Не удалось повторно прочитать часть для итоговой проверки.")
@@ -797,6 +842,9 @@ class UpdaterApp(App):
                 base["downloaded"] = True
                 # Cleanup is now strictly post-assembly and best effort. A SAF cleanup
                 # failure must never invalidate the successfully assembled archive.
+                Clock.schedule_once(
+                    lambda dt: self._download_status("Архив проверен. Очистка временных частей…"), 0
+                )
                 for idx, item in enumerate(chunks):
                     self._saf_delete(resolver, Docs, part_uris[idx])
                 if backup is not None:
@@ -810,6 +858,9 @@ class UpdaterApp(App):
             extra_done = 0
             for item in extras:
                 name = item["name"]
+                Clock.schedule_once(
+                    lambda dt, n=name: self._download_status("Дополнительный архив: {}".format(n)), 0
+                )
                 temp_name = "." + name + ".download"
                 temp = find(folder, temp_name)
                 expected_size = int(item.get("size") or 0)
@@ -904,9 +955,12 @@ class UpdaterApp(App):
         except Exception as exc:
             error = friendly_network_error(exc)
             Clock.schedule_once(lambda dt, e=error: self._download_failed(e), 0)
+    def _download_status(self, message):
+        self._set_status(message)
+
     def _download_progress(self, percent, name, received):
         self.progress.value = min(100, percent)
-        self._set_status("Хабар доставляется… {:.0f}%".format(min(100, percent)))
+        self._set_status("Хабар доставляется… {:.0f}% • {}".format(min(100, percent), name))
 
     def _download_done(self):
         self.progress.value = 100
