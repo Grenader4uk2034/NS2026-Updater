@@ -861,7 +861,7 @@ class UpdaterApp(App):
                 Clock.schedule_once(
                     lambda dt, n=name: self._download_status("Дополнительный архив: {}".format(n)), 0
                 )
-                temp_name = "." + name + ".download
+                temp_name = "." + name + ".download"
                 temp = find(folder, temp_name)
                 expected_size = int(item.get("size") or 0)
                 expected_hash = item["expected_md5"].lower()
