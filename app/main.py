@@ -495,7 +495,7 @@ class UpdaterApp(App):
         Array = autoclass('java.lang.reflect.Array'); Byte = autoclass('java.lang.Byte')
         stream = resolver.openInputStream(uri)
         if stream is None: raise RuntimeError('Не удалось прочитать архив для MD5.')
-        digest = hashlib.md5(); buf = Array.newInstance(Byte.TYPE, 65536)
+        digest = hashlib.md5(); buf = Array.newInstance(Byte.TYPE, 1024 * 1024)
         try:
             while True:
                 n = stream.read(buf)
@@ -666,16 +666,19 @@ class UpdaterApp(App):
                             check_jobs.append((name, item, existing, actual_size))
                     except Exception:
                         pass
-            # Two concurrent workers balance faster verification against SAF/storage load.
+            # Adaptive verification: scale with CPU count, capped at 3 for SAF/storage safety.
+            worker_count = min(3, max(1, (os.cpu_count() or 2) - 1), len(check_jobs)) if check_jobs else 1
             checked = {}
-            with ThreadPoolExecutor(max_workers=min(2, max(1, len(check_jobs)))) as pool:
+            with ThreadPoolExecutor(max_workers=worker_count) as pool:
                 futures = [
                     pool.submit(self._verify_existing_asset, resolver, uri, name, size, item["expected_md5"], cache_snapshot)
                     for name, item, uri, size in check_jobs
                 ]
-                for future in as_completed(futures):
+                for completed_index, future in enumerate(as_completed(futures), 1):
                     name, valid, digest = future.result()
                     checked[name] = (valid, digest)
+                    check_percent = 100.0 * completed_index / max(1, len(futures))
+                    Clock.schedule_once(lambda dt, p=check_percent, n=name: (self._set_progress(p), self._set_status("Проверка архивов: {:.0f}% • {}".format(p, n))), 0)
             for name, item, existing, actual_size in check_jobs:
                 valid, digest = checked.get(name, (False, None))
                 item["downloaded"] = valid
