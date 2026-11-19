@@ -6,7 +6,7 @@ source.dir = app
 source.include_exts = py,png,jpg,kv,atlas,json
 version = 0.3
 android.numeric_version = 3
-requirements = python3,kivy,filetype,pyjnius
+requirements = python3,kivy,filetype,pyjnius,certifi
 orientation = portrait
 fullscreen = 0
 
