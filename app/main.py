@@ -289,7 +289,10 @@ class UpdaterApp(App):
         Activity = autoclass("org.kivy.android.PythonActivity")
         resolver = Activity.mActivity.getContentResolver()
         tree = Uri.parse(self.tree_uri)
-        root = Docs.buildDocumentUriUsingTree(tree, Docs.getTreeDocumentId(tree))
+        document_id = Docs.getTreeDocumentId(tree)
+        if not document_id.endswith("Download/NSOGSR"):
+            raise RuntimeError("Путь должен быть Download/NSOGSR. Выберите нужную папку.")
+        root = Docs.buildDocumentUriUsingTree(tree, document_id)
         root_name = None
         cursor = resolver.query(root, None, None, None, None)
         if cursor is not None:
@@ -495,7 +498,7 @@ class UpdaterApp(App):
             total = sum(item["size"] for item in found.values())
             pending = sum(item["size"] for item in found.values() if not item["downloaded"])
             if pending > 0:
-                message = "Хабар обнаружен!\\nВес хабаря: {}".format(format_size(pending))
+                message = "Хабар обнаружен!\nВес хабаря: {}".format(format_size(pending))
                 signal_state = "online"
             else:
                 message = "В Зоне затишье.\\nВсе архивы уже на месте."
