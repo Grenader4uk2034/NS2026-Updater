@@ -757,29 +757,6 @@ class UpdaterApp(App):
                         finally:
                             inp.close()
     
-                    headers = {"User-Agent": "NS2026-Updater-Android"}
-                    if offset:
-                        headers["Range"] = "bytes={}-".format(offset)
-                    Clock.schedule_once(
-                        lambda dt, i=idx + 1, n=name, off=offset: self._download_status(
-                            "Подключение к серверу • часть {}/17 {}{}".format(
-                                i, n, " (продолжение)" if off else ""
-                            )
-                        ), 0
-                    )
-                    request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                    response = urlopen_retry(request, timeout=60)
-                    status_code = getattr(response, "status", response.getcode())
-                    if offset and status_code != 206:
-                        response.close()
-                        # Server ignored Range; restart this piece from byte zero.
-                        digest = hashlib.md5()
-                        offset = 0
-                        request = urllib.request.Request(
-                            item["browser_download_url"],
-                            headers={"User-Agent": "NS2026-Updater-Android"},
-                        )
-                        response = urlopen_retry(request, timeout=60)
                     Clock.schedule_once(
                         lambda dt, i=idx + 1, n=name: self._download_status(
                             "Загрузка части {}/17: {}".format(i, n)
@@ -787,25 +764,49 @@ class UpdaterApp(App):
                     )
                     if part is None:
                         part = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
-                    out = resolver.openOutputStream(part, "wa" if offset else "w")
-                    if out is None:
-                        response.close()
-                        raise RuntimeError("Не удалось записать временную часть " + name)
                     got = offset
-                    try:
-                        with response:
-                            while True:
-                                data = response.read(1024 * 1024)
-                                if not data:
-                                    break
-                                out.write(data)
-                                digest.update(data)
-                                got += len(data)
-                                pct = 75.0 * (downloaded_bytes + got - offset) / max(1, base_size)
-                                Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
-                        out.flush()
-                    finally:
-                        out.close()
+                    stream_attempt = 0
+                    while True:
+                        headers = {"User-Agent": "NS2026-Updater-Android"}
+                        if got:
+                            headers["Range"] = "bytes={}-".format(got)
+                        request = urllib.request.Request(item["browser_download_url"], headers=headers)
+                        response = urlopen_retry(request, timeout=60, attempts=4)
+                        status_code = getattr(response, "status", response.getcode())
+                        if got and status_code != 206:
+                            response.close()
+                            got = 0
+                            digest = hashlib.md5()
+                            offset = 0
+                            headers = {"User-Agent": "NS2026-Updater-Android"}
+                            request = urllib.request.Request(item["browser_download_url"], headers=headers)
+                            response = urlopen_retry(request, timeout=60, attempts=4)
+                        out = resolver.openOutputStream(part, "wa" if got else "w")
+                        if out is None:
+                            response.close()
+                            raise RuntimeError("Не удалось записать временную часть " + name)
+                        try:
+                            with response:
+                                while True:
+                                    data = response.read(1024 * 1024)
+                                    if not data:
+                                        break
+                                    out.write(data)
+                                    digest.update(data)
+                                    got += len(data)
+                                    pct = 75.0 * (downloaded_bytes + got - offset) / max(1, base_size)
+                                    Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
+                            out.flush()
+                        except (OSError, urllib.error.URLError, TimeoutError) as stream_exc:
+                            stream_attempt += 1
+                            if stream_attempt >= 4:
+                                raise RuntimeError("Связь оборвалась после 4 попыток. Прогресс части сохранён: {} байт. {}".format(got, stream_exc))
+                            Clock.schedule_once(lambda dt, n=name, a=stream_attempt: self._download_status("Связь прервана. Повтор {} из 3 • {}".format(a, n)), 0)
+                            time.sleep(min(2 ** stream_attempt, 8))
+                            continue
+                        finally:
+                            out.close()
+                        break
     
                 Clock.schedule_once(
                     lambda dt, i=idx + 1, n=name: self._download_status(
@@ -1050,14 +1051,14 @@ class UpdaterApp(App):
                 if offset:
                     headers["Range"] = "bytes={}-".format(offset)
                 request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                response = urlopen_retry(request, timeout=120, attempts=4)
                 status_code = getattr(response, "status", response.getcode())
                 if offset and status_code != 206:
                     response.close()
                     digest = hashlib.md5()
                     offset = 0
                     request = urllib.request.Request(item["browser_download_url"], headers={"User-Agent": "NS2026-Updater-Android"})
-                    response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                    response = urlopen_retry(request, timeout=120, attempts=4)
                 if temp is None:
                     temp = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
                 try:
