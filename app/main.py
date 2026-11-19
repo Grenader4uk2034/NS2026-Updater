@@ -393,7 +393,7 @@ class UpdaterApp(App):
             return
         self._set_busy(True)
         self.progress.value = 0
-        self._set_status("Проверяем, есть ли свежий хабарь…")
+        self._set_status("Проверяем, есть ли свежий хабар…")
         threading.Thread(target=self._check_worker, daemon=True).start()
 
     def _check_worker(self):
@@ -480,7 +480,7 @@ class UpdaterApp(App):
             total = sum(item["size"] for item in found.values())
             pending = sum(item["size"] for item in found.values() if not item["downloaded"])
             if pending > 0:
-                message = "Хабар обнаружен!\nВес хабаря: {}".format(format_size(pending))
+                message = "Хабар обнаружен!\nВес хабара: {}".format(format_size(pending))
                 signal_state = "online"
             else:
                 message = "В Зоне затишье.\\nВсе архивы уже на месте."
@@ -510,7 +510,7 @@ class UpdaterApp(App):
         self._set_busy(True)
         self.progress.value = 0
         self._set_signal("online")
-        self._set_status("Подготовка к доставке хабаря…")
+        self._set_status("Подготовка к доставке хабара…")
         threading.Thread(target=self._download_worker, daemon=True).start()
 
     def _download_worker(self):
@@ -649,7 +649,7 @@ class UpdaterApp(App):
 
     def _download_failed(self, error):
         self._set_signal("offline")
-        self._set_status("Доставка хабаря прервана.\\n" + error)
+        self._set_status("Доставка хабара прервана.\\n" + error)
         self._set_busy(False)
         self.download_button.disabled = not any(
             not item.get("downloaded") for item in self.assets.values()
