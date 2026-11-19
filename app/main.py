@@ -115,7 +115,7 @@ class UpdaterApp(App):
         root.add_widget(heading)
 
         author = Label(
-            text='Создано Гренычем для фанатов\\n[color=9aaa85][ref=telegram]@Grenader4uk[/ref][/color] • специально для stalker-mobile.ru',
+            text='Создано Гренычем для фанатов [color=9aaa85][ref=telegram]@Grenader4uk[/ref][/color] • специально для stalker-mobile.ru',
             markup=True,
             halign="center",
             font_size="12sp",
@@ -125,17 +125,6 @@ class UpdaterApp(App):
         author.bind(on_ref_press=self._open_telegram)
         root.add_widget(author)
 
-        self.signal = Label(
-            text="[color=9aaa85][b]●[/b][/color]",
-            markup=True,
-            font_size="25sp",
-            size_hint_y=None,
-            height=dp(32),
-        )
-        root.add_widget(self.signal)
-        self.signal_animation = Animation(opacity=0.25, duration=0.65) + Animation(opacity=1, duration=0.65)
-        self.signal_animation.repeat = True
-        self.signal_animation.start(self.signal)
 
         self.status = Label(
             text="Нажмите «Проверить обновления»",
@@ -261,15 +250,8 @@ class UpdaterApp(App):
             self._set_status("Не удалось сохранить доступ: " + str(exc))
 
     def _set_signal(self, state):
-        if not hasattr(self, "signal"):
-            return
-        colors = {"online": "9aaa85", "offline": "bd5146", "idle": "777d75"}
-        self.signal.text = "[color={}][b]●[/b][/color]".format(colors.get(state, colors["idle"]))
-        self.signal_animation.cancel(self.signal)
-        if state == "online":
-            self.signal_animation.start(self.signal)
-        else:
-            self.signal.opacity = 1
+        # Broken blinking glyph removed from the UI.
+        return
 
     def _open_telegram(self, instance, ref):
         try:
