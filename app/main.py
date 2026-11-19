@@ -575,14 +575,19 @@ class UpdaterApp(App):
 
                 if offset == expected_size and expected_size > 0:
                     try:
-                        if self._saf_md5(resolver, part).lower() == expected_hash:
-                            downloaded_bytes += expected_size
-                            pct = 75.0 * downloaded_bytes / max(1, base_size)
-                            Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
-                            Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
-                            continue
+                        part_valid = self._saf_md5(resolver, part).lower() == expected_hash
                     except Exception:
-                        pass
+                        part_valid = False
+                    if part_valid:
+                        downloaded_bytes += expected_size
+                        pct = 75.0 * downloaded_bytes / max(1, base_size)
+                        Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
+                        Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
+                        continue
+                    if not self._saf_delete(resolver, Docs, part):
+                        raise RuntimeError("Android не разрешил удалить повреждённую временную часть {}.".format(name))
+                    part = None
+                    offset = 0
 
                 if offset > expected_size:
                     if not self._saf_delete(resolver, Docs, part):
@@ -788,18 +793,24 @@ class UpdaterApp(App):
                 digest = hashlib.md5()
                 if offset == expected_size and offset > 0:
                     try:
-                        if self._saf_md5(resolver, temp).lower() == expected_hash:
-                            old = find(folder, name)
-                            if old is not None:
-                                if not self._saf_delete(resolver, Docs, old):
-                                    raise RuntimeError("Не удалось заменить старый архив " + name)
-                            if Docs.renameDocument(resolver, temp, name) is None:
-                                raise RuntimeError("Не удалось завершить " + name)
-                            item["downloaded"] = True
-                            extra_done += expected_size
-                            continue
+                        temp_valid = self._saf_md5(resolver, temp).lower() == expected_hash
                     except Exception:
-                        pass
+                        temp_valid = False
+                    if temp_valid:
+                        old = find(folder, name)
+                        if old is not None:
+                            if not self._saf_delete(resolver, Docs, old):
+                                raise RuntimeError("Не удалось заменить старый архив " + name)
+                        if Docs.renameDocument(resolver, temp, name) is None:
+                            raise RuntimeError("Не удалось завершить " + name)
+                        item["downloaded"] = True
+                        extra_done += expected_size
+                        continue
+                    if not self._saf_delete(resolver, Docs, temp):
+                        raise RuntimeError("Android не разрешил удалить повреждённый временный файл " + name)
+                    temp = None
+                    offset = 0
+
                 if offset > expected_size:
                     if not self._saf_delete(resolver, Docs, temp):
                         raise RuntimeError("Android не разрешил удалить повреждённый временный файл " + name)
