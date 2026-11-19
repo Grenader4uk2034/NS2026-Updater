@@ -605,7 +605,7 @@ class UpdaterApp(App):
                     if offset and part is not None:
                         Clock.schedule_once(
                             lambda dt, i=idx + 1, n=name, size=offset: self._download_status(
-                                "Восстановление {} • проверка {} байт"..format(n, size)
+                                "Восстановление {} • проверка {} байт".format(n, size)
                             ), 0
                         )
                         inp = resolver.openInputStream(part)
