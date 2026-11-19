@@ -593,8 +593,13 @@ class UpdaterApp(App):
                                 Clock.schedule_once(lambda dt,p=pct,n=name,r=got:self._download_progress(p,n,r),0)
                         out.flush()
                     finally: out.close()
+                    expected_size=int(item.get('size') or 0)
+                    if got != expected_size:
+                        Docs.deleteDocument(resolver,part)
+                        raise RuntimeError('Размер части '+name+' не совпал. Повреждённый файл удалён, скачайте повторно.')
                     if digest.hexdigest().lower()!=item['expected_md5']:
-                        raise RuntimeError('MD5 не совпал для '+name+'. Временная часть оставлена для повтора.')
+                        Docs.deleteDocument(resolver,part)
+                        raise RuntimeError('MD5 не совпал для '+name+'. Повреждённый файл удалён; повторите загрузку.')
                     inp=resolver.openInputStream(part); out=resolver.openOutputStream(assembly,'wa' if committed else 'w')
                     if inp is None or out is None: raise RuntimeError('Не удалось объединить '+name)
                     buf=Array.newInstance(Byte.TYPE,1024*1024); copied=0
@@ -635,7 +640,12 @@ class UpdaterApp(App):
                             Clock.schedule_once(lambda dt,p=pct,n=name,r=got:self._download_progress(p,n,r),0)
                     out.flush()
                 finally: out.close()
-                if digest.hexdigest().lower()!=item['expected_md5']: raise RuntimeError('MD5 не совпал для '+name)
+                if got != int(item.get('size') or 0):
+                    Docs.deleteDocument(resolver,temp)
+                    raise RuntimeError('Размер файла '+name+' не совпал. Повреждённый файл удалён.')
+                if digest.hexdigest().lower()!=item['expected_md5']:
+                    Docs.deleteDocument(resolver,temp)
+                    raise RuntimeError('MD5 не совпал для '+name+'. Повреждённый файл удалён.')
                 old=find(folder,name)
                 if old is not None: Docs.deleteDocument(resolver,old)
                 if Docs.renameDocument(resolver,temp,name) is None: raise RuntimeError('Не удалось завершить '+name)
