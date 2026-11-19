@@ -350,7 +350,7 @@ class UpdaterApp(App):
             return int(cursor.getLong(col)) if col >= 0 and cursor.moveToFirst() else 0
         finally: cursor.close()
 
-    def _saf_md5(self, resolver, uri):
+    def _saf_md5(self, resolver, uri, progress_callback=None):
         from jnius import autoclass
         Array = autoclass('java.lang.reflect.Array'); Byte = autoclass('java.lang.Byte')
         stream = resolver.openInputStream(uri)
@@ -361,6 +361,8 @@ class UpdaterApp(App):
                 n = stream.read(buf)
                 if n < 0: break
                 digest.update(bytes((int(buf[i]) & 255) for i in range(n)))
+                if progress_callback is not None:
+                    progress_callback(n)
         finally: stream.close()
         return digest.hexdigest()
     def _fit_label(self, widget, size):
@@ -632,7 +634,14 @@ class UpdaterApp(App):
     
                     if offset == expected_size and expected_size > 0:
                         try:
-                            part_valid = self._saf_md5(resolver, part).lower() == expected_hash
+                            checked = [0]
+                            def report_check_progress(amount, base_done=downloaded_bytes, part_name=name, part_size=expected_size):
+                                checked[0] += amount
+                                pct = 75.0 * (base_done + checked[0]) / max(1, base_size)
+                                Clock.schedule_once(lambda dt, p=pct: self._set_progress(p), 0)
+                            part_valid = self._saf_md5(
+                                resolver, part, progress_callback=report_check_progress
+                            ).lower() == expected_hash
                         except Exception:
                             part_valid = False
                         if part_valid:
@@ -1009,8 +1018,11 @@ class UpdaterApp(App):
     def _download_status(self, message):
         self._set_status(message)
 
+    def _set_progress(self, percent):
+        self.progress.value = max(0, min(100, percent))
+
     def _download_progress(self, percent, name, received):
-        self.progress.value = min(100, percent)
+        self._set_progress(percent)
         self._set_status("Хабар доставляется… {:.0f}% • {}".format(min(100, percent), name))
 
     def _download_done(self):
