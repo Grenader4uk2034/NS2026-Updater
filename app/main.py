@@ -3,9 +3,12 @@ import hashlib
 import json
 import os
 import shutil
+import ssl
 import threading
 import urllib.error
 import urllib.request
+
+import certifi
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -41,6 +44,21 @@ def format_size(value):
     return "{:.2f} ТБ".format(value)
 
 
+def ssl_context():
+    # certifi provides an up-to-date CA bundle inside the Android APK.
+    return ssl.create_default_context(cafile=certifi.where())
+
+
+NETWORK_CONTEXT = ssl_context()
+
+
+def friendly_network_error(error):
+    if isinstance(error, (ssl.SSLError, urllib.error.URLError)) and "CERTIFICATE_VERIFY_FAILED" in str(error):
+        return "Не удалось проверить SSL-сертификат сервера. Проверьте дату и время телефона, затем повторите попытку."
+    return str(error)
+
+
+
 def http_open(url, accept="application/octet-stream"):
     request = urllib.request.Request(
         url,
@@ -49,7 +67,7 @@ def http_open(url, accept="application/octet-stream"):
             "Accept": accept,
         },
     )
-    return urllib.request.urlopen(request, timeout=45)
+    return urllib.request.urlopen(request, timeout=45, context=NETWORK_CONTEXT)
 
 
 class UpdaterApp(App):
@@ -595,7 +613,7 @@ class UpdaterApp(App):
             )
             Clock.schedule_once(lambda dt: self._check_done(message), 0)
         except Exception as exc:
-            error = str(exc)
+            error = friendly_network_error(exc)
             Clock.schedule_once(lambda dt, e=error: self._check_failed(e), 0)
 
     def _is_cached(self, asset):
@@ -674,7 +692,7 @@ class UpdaterApp(App):
                     url,
                     headers={"User-Agent": "NS2026-Updater-Android"},
                 )
-                with urllib.request.urlopen(request, timeout=90) as response:
+                with urllib.request.urlopen(request, timeout=90, context=NETWORK_CONTEXT) as response:
                     response_length = response.headers.get("Content-Length")
                     if response_length and int(response_length) != int(asset["size"]):
                         raise RuntimeError(
@@ -728,7 +746,7 @@ class UpdaterApp(App):
 
             Clock.schedule_once(lambda dt: self._download_done(), 0)
         except Exception as exc:
-            error = str(exc)
+            error = friendly_network_error(exc)
             Clock.schedule_once(lambda dt, e=error: self._download_failed(e), 0)
 
     def _download_progress(self, percent, name, received):
