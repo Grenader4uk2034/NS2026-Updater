@@ -88,6 +88,7 @@ jobs:
           "$APKSIGNER" verify --verbose --print-certs "$APK"
           echo "=== APK package metadata ==="
           "$AAPT" dump badging "$APK" | grep -E 'package:|sdkVersion:|targetSdkVersion:|native-code:' || true
+          echo "=== APK permissions ==="
           "$AAPT" dump permissions "$APK" | head -n 80
           echo "=== ABI libraries ==="
           unzip -l "$APK" | grep -E 'lib/[^/]+/.*\.so        if: always()
@@ -211,7 +212,6 @@ jobs:
             build.log
             build-exit-code.txt
           if-no-files-found: warn | head -n 50
-
       - name: Create diagnostic report
         if: always()
         shell: bash
