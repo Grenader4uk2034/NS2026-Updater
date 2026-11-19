@@ -573,7 +573,7 @@ class UpdaterApp(App):
                             "Проверка части {}/17: {}".format(i, n)
                         ), 0
                     )
-                    temp_name = "." + name + ".download
+                    temp_name = "." + name + ".download"
                     part = find(folder, temp_name)
                     expected_size = int(item.get("size") or 0)
                     expected_hash = item["expected_md5"].lower()
