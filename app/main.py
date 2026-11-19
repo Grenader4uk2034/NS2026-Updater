@@ -513,129 +513,397 @@ class UpdaterApp(App):
         self._set_status("Подготовка к доставке хабара…")
         threading.Thread(target=self._download_worker, daemon=True).start()
 
+    def _saf_delete(self, resolver, Docs, uri):
+        """Best-effort SAF deletion. Never let a cleanup failure interrupt a valid download."""
+        if uri is None:
+            return True
+        try:
+            Docs.deleteDocument(resolver, uri)
+        except Exception:
+            try:
+                resolver.delete(uri, None, None)
+            except Exception:
+                pass
+        try:
+            cursor = resolver.query(uri, None, None, None, None)
+            if cursor is None:
+                return True
+            try:
+                return not cursor.moveToFirst()
+            finally:
+                cursor.close()
+        except Exception:
+            # SAF providers sometimes fail to query a URI after deleting it.
+            return False
+
+    def _saf_hash_size(self, resolver, uri):
+        size = self._saf_size(resolver, uri)
+        digest = self._saf_md5(resolver, uri)
+        return size, digest
+
+    def _save_chunk_state(self, path, state):
+        temp_path = path + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as target:
+            json.dump(state, target)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temp_path, path)
+
     def _download_worker(self):
         try:
-            if not self.tree_uri: raise RuntimeError('Сначала выберите папку Download.')
+            if not self.tree_uri:
+                raise RuntimeError("Сначала выберите папку Download.")
             resolver, Docs, tree, folder, find = self._saf_target()
             from jnius import autoclass
-            Array = autoclass('java.lang.reflect.Array'); Byte = autoclass('java.lang.Byte')
-            base = self.assets[BASE_ASSET]; chunks = base['chunks']
-            hashes = [x['expected_md5'] for x in chunks]
-            state_path = os.path.join(self.user_data_dir, 'base_saf_state.json')
-            assembly_name = '.' + BASE_ASSET + '.assembling'
-            assembly = find(folder, assembly_name)
-            if assembly is None:
-                assembly = Docs.createDocument(resolver, folder, 'application/octet-stream', assembly_name)
-            state = {'next_chunk':0,'committed_bytes':0,'chunks_md5':hashes}
-            if os.path.isfile(state_path):
-                try:
-                    with open(state_path,'r',encoding='utf-8') as sf: saved=json.load(sf)
-                    if saved.get('chunks_md5') == hashes and not saved.get('complete'): state.update(saved)
-                except Exception: pass
-            committed=int(state.get('committed_bytes',0)); next_chunk=int(state.get('next_chunk',0))
-            if self._saf_size(resolver, assembly) != committed:
-                Docs.deleteDocument(resolver, assembly)
-                assembly=Docs.createDocument(resolver,folder,'application/octet-stream',assembly_name)
-                committed=0; next_chunk=0
-            if not base.get('downloaded'):
-                total=max(1,int(base['size'])); completed=committed
-                for idx in range(next_chunk,len(chunks)):
-                    item=chunks[idx]; name=item['name']; part_name='.'+name+'.download'
-                    part=find(folder,part_name)
-                    if part is None: part=Docs.createDocument(resolver,folder,'application/octet-stream',part_name)
-                    offset=self._saf_size(resolver,part); digest=hashlib.md5()
-                    if offset:
-                        inp=resolver.openInputStream(part); buf=Array.newInstance(Byte.TYPE,65536)
+            Array = autoclass("java.lang.reflect.Array")
+            Byte = autoclass("java.lang.Byte")
+            base = self.assets[BASE_ASSET]
+            chunks = base["chunks"]
+            hashes = [item["expected_md5"].lower() for item in chunks]
+            base_size = int(base.get("size") or 0)
+
+            if not base.get("downloaded"):
+                # Stage 1: download and validate all 17 pieces. Keep every valid piece
+                # until the assembled archive has been verified successfully.
+                downloaded_bytes = 0
+                for idx, item in enumerate(chunks):
+                    name = item["name"]
+                    temp_name = "." + name + ".download"
+                    part = find(folder, temp_name)
+                    expected_size = int(item.get("size") or 0)
+                    expected_hash = item["expected_md5"].lower()
+                    offset = self._saf_size(resolver, part) if part is not None else 0
+    
+                    if offset == expected_size and expected_size > 0:
+                        try:
+                            part_valid = self._saf_md5(resolver, part).lower() == expected_hash
+                        except Exception:
+                            part_valid = False
+                        if part_valid:
+                            downloaded_bytes += expected_size
+                            pct = 75.0 * downloaded_bytes / max(1, base_size)
+                            Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
+                            Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
+                            continue
+                        if not self._saf_delete(resolver, Docs, part):
+                            raise RuntimeError("Android не разрешил удалить повреждённую временную часть {}.".format(name))
+                        part = None
+                        offset = 0
+    
+                    if offset > expected_size:
+                        if not self._saf_delete(resolver, Docs, part):
+                            raise RuntimeError("Android не разрешил убрать повреждённую временную часть {}.".format(name))
+                        part = None
+                        offset = 0
+    
+                    digest = hashlib.md5()
+                    if offset and part is not None:
+                        inp = resolver.openInputStream(part)
+                        if inp is None:
+                            raise RuntimeError("Не удалось прочитать частично скачанную часть " + name)
+                        buf = Array.newInstance(Byte.TYPE, 65536)
                         try:
                             while True:
-                                n=inp.read(buf)
-                                if n<0: break
+                                n = inp.read(buf)
+                                if n < 0:
+                                    break
                                 digest.update(bytes((int(buf[j]) & 255) for j in range(n)))
-                        finally: inp.close()
-                    headers={'User-Agent':'NS2026-Updater-Android'}
-                    if offset: headers['Range']='bytes={}-'.format(offset)
-                    req=urllib.request.Request(item['browser_download_url'],headers=headers)
-                    response=urllib.request.urlopen(req,timeout=120,context=NETWORK_CONTEXT)
-                    if offset and getattr(response,'status',response.getcode()) != 206:
-                        response.close(); Docs.deleteDocument(resolver,part)
-                        part=Docs.createDocument(resolver,folder,'application/octet-stream',part_name)
-                        offset=0; digest=hashlib.md5()
-                        req=urllib.request.Request(item['browser_download_url'],headers={'User-Agent':'NS2026-Updater-Android'})
-                        response=urllib.request.urlopen(req,timeout=120,context=NETWORK_CONTEXT)
-                    out=resolver.openOutputStream(part,'wa' if offset else 'w')
-                    if out is None: raise RuntimeError('Не удалось записать временную часть '+name)
-                    got=offset
+                        finally:
+                            inp.close()
+    
+                    headers = {"User-Agent": "NS2026-Updater-Android"}
+                    if offset:
+                        headers["Range"] = "bytes={}-".format(offset)
+                    request = urllib.request.Request(item["browser_download_url"], headers=headers)
+                    response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                    status_code = getattr(response, "status", response.getcode())
+                    if offset and status_code != 206:
+                        response.close()
+                        # Server ignored Range; restart this piece from byte zero.
+                        digest = hashlib.md5()
+                        offset = 0
+                        request = urllib.request.Request(
+                            item["browser_download_url"],
+                            headers={"User-Agent": "NS2026-Updater-Android"},
+                        )
+                        response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                    if part is None:
+                        part = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
+                    out = resolver.openOutputStream(part, "wa" if offset else "w")
+                    if out is None:
+                        response.close()
+                        raise RuntimeError("Не удалось записать временную часть " + name)
+                    got = offset
                     try:
                         with response:
                             while True:
-                                data=response.read(1024*1024)
-                                if not data: break
-                                out.write(data); digest.update(data); got+=len(data)
-                                pct=(completed+got-offset)*85.0/total
-                                Clock.schedule_once(lambda dt,p=pct,n=name,r=got:self._download_progress(p,n,r),0)
+                                data = response.read(1024 * 1024)
+                                if not data:
+                                    break
+                                out.write(data)
+                                digest.update(data)
+                                got += len(data)
+                                pct = 75.0 * (downloaded_bytes + got - offset) / max(1, base_size)
+                                Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
                         out.flush()
-                    finally: out.close()
-                    expected_size=int(item.get('size') or 0)
-                    if got != expected_size:
-                        Docs.deleteDocument(resolver,part)
-                        raise RuntimeError('Размер части '+name+' не совпал. Повреждённый файл удалён, скачайте повторно.')
-                    if digest.hexdigest().lower()!=item['expected_md5']:
-                        Docs.deleteDocument(resolver,part)
-                        raise RuntimeError('MD5 не совпал для '+name+'. Повреждённый файл удалён; повторите загрузку.')
-                    inp=resolver.openInputStream(part); out=resolver.openOutputStream(assembly,'wa' if committed else 'w')
-                    if inp is None or out is None: raise RuntimeError('Не удалось объединить '+name)
-                    buf=Array.newInstance(Byte.TYPE,1024*1024); copied=0
+                    finally:
+                        out.close()
+    
+                if got != expected_size:
+                    raise RuntimeError("Размер части {} не совпал. Частичный файл сохранён для повторной загрузки.".format(name))
+                if digest.hexdigest().lower() != expected_hash:
+                    raise RuntimeError("MD5 части {} не совпал. Повреждённая часть оставлена до следующей проверки.".format(name))
+                downloaded_bytes += expected_size
+                Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
+    
+                # Recheck the entire set before assembly so no unchecked piece enters
+                # the final archive.
+                part_uris = []
+                for idx, item in enumerate(chunks):
+                    part_uri = find(folder, "." + item["name"] + ".download")
+                    if part_uri is None:
+                        raise RuntimeError("Не найдена скачанная часть " + item["name"])
+                    size, digest = self._saf_hash_size(resolver, part_uri)
+                    if size != int(item.get("size") or 0) or digest.lower() != item["expected_md5"].lower():
+                        raise RuntimeError("Повторная проверка части {} не пройдена.".format(item["name"]))
+                    part_uris.append(part_uri)
+    
+                # Stage 2: append verified chunks into a temporary assembly. Chunks
+                # are retained; checkpoints are written only after each append closes.
+                Clock.schedule_once(lambda dt: self._set_status("Все 17 частей готовы. Собираем общий архив…"), 0)
+                assembly_name = "." + BASE_ASSET + ".assembling"
+                assembly = find(folder, assembly_name)
+                state_path = os.path.join(self.user_data_dir, "base_saf_state.json")
+                state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": hashes}
+                if os.path.isfile(state_path):
+                    try:
+                        with open(state_path, "r", encoding="utf-8") as source:
+                            saved = json.load(source)
+                        if saved.get("chunks_md5") == hashes and not saved.get("complete"):
+                            state.update(saved)
+                    except Exception:
+                        pass
+    
+                next_chunk = max(0, min(len(chunks), int(state.get("next_chunk", 0))))
+                committed = max(0, int(state.get("committed_bytes", 0)))
+                expected_committed = sum(int(chunks[i].get("size") or 0) for i in range(next_chunk))
+                assembly_size = self._saf_size(resolver, assembly) if assembly is not None else 0
+                # If a process died between appending and checkpointing, discard only
+                # the assembly and rebuild from the still-preserved verified pieces.
+                if assembly is None or assembly_size != committed or committed != expected_committed:
+                    if assembly is not None and not self._saf_delete(resolver, Docs, assembly):
+                        raise RuntimeError("Не удалось сбросить повреждённый промежуточный общий архив.")
+                    assembly = Docs.createDocument(resolver, folder, "application/octet-stream", assembly_name)
+                    next_chunk = 0
+                    committed = 0
+                    state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": hashes, "complete": False}
+                    self._save_chunk_state(state_path, state)
+    
+                for idx in range(next_chunk, len(chunks)):
+                    item = chunks[idx]
+                    inp = resolver.openInputStream(part_uris[idx])
+                    out = resolver.openOutputStream(assembly, "wa" if committed else "w")
+                    if inp is None or out is None:
+                        if inp is not None:
+                            inp.close()
+                        if out is not None:
+                            out.close()
+                        raise RuntimeError("Не удалось открыть поток для объединения " + item["name"])
+                    buf = Array.newInstance(Byte.TYPE, 1024 * 1024)
+                    copied = 0
                     try:
                         while True:
-                            n=inp.read(buf)
-                            if n<0: break
-                            out.write(buf,0,n); copied+=n
+                            n = inp.read(buf)
+                            if n < 0:
+                                break
+                            out.write(buf, 0, n)
+                            copied += n
                         out.flush()
-                    finally: inp.close(); out.close()
-                    committed+=copied; completed+=copied; Docs.deleteDocument(resolver,part)
-                    state={'next_chunk':idx+1,'committed_bytes':committed,'chunks_md5':hashes,'complete':False}
-                    with open(state_path,'w',encoding='utf-8') as sf: json.dump(state,sf)
-                    Clock.schedule_once(lambda dt,i=idx+1:self._set_status('Проверено и объединено частей: {}/17'.format(i)),0)
-                assembled_md5=self._saf_md5(resolver,assembly)
-                previous=find(folder,BASE_ASSET)
-                if previous is not None: Docs.deleteDocument(resolver,previous)
-                final_uri=Docs.renameDocument(resolver,assembly,BASE_ASSET)
-                if final_uri is None: raise RuntimeError('Не удалось завершить gamedata.sq_base.')
-                with open(state_path,'w',encoding='utf-8') as sf: json.dump({'complete':True,'chunks_md5':hashes,'assembled_md5':assembled_md5},sf)
-                base['downloaded']=True
-            extras=[self.assets[n] for n in REQUIRED_ASSETS[1:] if not self.assets[n].get('downloaded')]
-            extra_total=max(1,sum(int(x.get('size') or 0) for x in extras)); extra_done=0
-            for item in extras:
-                name=item['name']; temp_name='.'+name+'.download'; temp=find(folder,temp_name)
-                if temp is not None: Docs.deleteDocument(resolver,temp)
-                temp=Docs.createDocument(resolver,folder,'application/octet-stream',temp_name)
-                digest=hashlib.md5(); req=urllib.request.Request(item['browser_download_url'],headers={'User-Agent':'NS2026-Updater-Android'})
-                out=resolver.openOutputStream(temp,'w'); got=0
-                if out is None: raise RuntimeError('Не удалось создать '+name)
-                try:
-                    with urllib.request.urlopen(req,timeout=120,context=NETWORK_CONTEXT) as response:
+                    finally:
+                        inp.close()
+                        out.close()
+                    if copied != int(item.get("size") or 0):
+                        raise RuntimeError("При объединении части {} получен неверный размер.".format(item["name"]))
+                    committed += copied
+                    state = {
+                        "next_chunk": idx + 1,
+                        "committed_bytes": committed,
+                        "chunks_md5": hashes,
+                        "complete": False,
+                    }
+                    self._save_chunk_state(state_path, state)
+                    pct = 75.0 + 20.0 * committed / max(1, base_size)
+                    Clock.schedule_once(lambda dt, p=pct, n=item["name"], r=committed: self._download_progress(p, n, r), 0)
+                    Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Объединено частей: {}/17".format(i)), 0)
+    
+                assembled_size, assembled_md5 = self._saf_hash_size(resolver, assembly)
+                if assembled_size != base_size:
+                    raise RuntimeError("Размер общего gamedata.sq_base не совпал. Все 17 частей сохранены.")
+                # Independently hash the exact byte stream of all 17 source pieces.
+                # The assembled file must match this concatenation byte-for-byte.
+                expected_assembly_digest = hashlib.md5()
+                for part_uri in part_uris:
+                    stream = resolver.openInputStream(part_uri)
+                    if stream is None:
+                        raise RuntimeError("Не удалось повторно прочитать часть для итоговой проверки.")
+                    buf = Array.newInstance(Byte.TYPE, 65536)
+                    try:
                         while True:
-                            data=response.read(1024*1024)
-                            if not data: break
-                            out.write(data); digest.update(data); got+=len(data)
-                            pct=85+(extra_done+got)*15.0/extra_total
-                            Clock.schedule_once(lambda dt,p=pct,n=name,r=got:self._download_progress(p,n,r),0)
+                            n = stream.read(buf)
+                            if n < 0:
+                                break
+                            expected_assembly_digest.update(bytes((int(buf[j]) & 255) for j in range(n)))
+                    finally:
+                        stream.close()
+                if expected_assembly_digest.hexdigest() != assembled_md5:
+                    raise RuntimeError("Общий архив не совпадает с последовательным объединением 17 частей. Части сохранены.")
+                # SAF swap: retain the previous archive as a backup until the new
+                # file has been renamed and verified.
+                old_base = find(folder, BASE_ASSET)
+                backup_name = "." + BASE_ASSET + ".backup"
+                backup = find(folder, backup_name)
+                if backup is not None and not self._saf_delete(resolver, Docs, backup):
+                    raise RuntimeError("Не удалось освободить резервное имя для замены общего архива.")
+                if old_base is not None:
+                    backup_uri = Docs.renameDocument(resolver, old_base, backup_name)
+                    if backup_uri is None:
+                        raise RuntimeError("Не удалось сохранить предыдущий gamedata.sq_base в резервную копию.")
+                    backup = backup_uri
+    
+                final_uri = Docs.renameDocument(resolver, assembly, BASE_ASSET)
+                if final_uri is None:
+                    if backup is not None:
+                        Docs.renameDocument(resolver, backup, BASE_ASSET)
+                    raise RuntimeError("Не удалось переименовать собранный архив. 17 частей сохранены.")
+                final_size, final_md5 = self._saf_hash_size(resolver, final_uri)
+                if final_size != base_size or final_md5 != assembled_md5:
+                    if not self._saf_delete(resolver, Docs, final_uri):
+                        failed_name = "." + BASE_ASSET + ".failed"
+                        if find(folder, failed_name) is not None:
+                            failed_name = failed_name + ".2"
+                        failed_uri = Docs.renameDocument(resolver, final_uri, failed_name)
+                        if failed_uri is None:
+                            raise RuntimeError("Итоговая проверка не пройдена; новая и резервная копии оставлены, части сохранены.")
+                    if backup is not None:
+                        Docs.renameDocument(resolver, backup, BASE_ASSET)
+                    raise RuntimeError("Проверка общего архива после сохранения не пройдена. Части сохранены.")
+    
+                self._save_chunk_state(state_path, {
+                    "complete": True,
+                    "chunks_md5": hashes,
+                    "assembled_md5": assembled_md5,
+                    "assembled_size": assembled_size,
+                })
+                base["downloaded"] = True
+                # Cleanup is now strictly post-assembly and best effort. A SAF cleanup
+                # failure must never invalidate the successfully assembled archive.
+                for idx, item in enumerate(chunks):
+                    self._saf_delete(resolver, Docs, part_uris[idx])
+                if backup is not None:
+                    self._saf_delete(resolver, Docs, backup)
+    
+                # Stage 3: download the remaining archives, using temp files and
+            # verification before replacement. These are not required to rebuild
+            # the already verified base archive.
+            extras = [self.assets[n] for n in REQUIRED_ASSETS[1:] if not self.assets[n].get("downloaded")]
+            extra_total = max(1, sum(int(x.get("size") or 0) for x in extras))
+            extra_done = 0
+            for item in extras:
+                name = item["name"]
+                temp_name = "." + name + ".download"
+                temp = find(folder, temp_name)
+                expected_size = int(item.get("size") or 0)
+                expected_hash = item["expected_md5"].lower()
+                offset = self._saf_size(resolver, temp) if temp is not None else 0
+                digest = hashlib.md5()
+                if offset == expected_size and offset > 0:
+                    try:
+                        temp_valid = self._saf_md5(resolver, temp).lower() == expected_hash
+                    except Exception:
+                        temp_valid = False
+                    if temp_valid:
+                        old = find(folder, name)
+                        if old is not None:
+                            if not self._saf_delete(resolver, Docs, old):
+                                raise RuntimeError("Не удалось заменить старый архив " + name)
+                        if Docs.renameDocument(resolver, temp, name) is None:
+                            raise RuntimeError("Не удалось завершить " + name)
+                        item["downloaded"] = True
+                        extra_done += expected_size
+                        continue
+                    if not self._saf_delete(resolver, Docs, temp):
+                        raise RuntimeError("Android не разрешил удалить повреждённый временный файл " + name)
+                    temp = None
+                    offset = 0
+
+                if offset > expected_size:
+                    if not self._saf_delete(resolver, Docs, temp):
+                        raise RuntimeError("Android не разрешил удалить повреждённый временный файл " + name)
+                    temp = None
+                    offset = 0
+                if offset and temp is not None:
+                    inp = resolver.openInputStream(temp)
+                    if inp is None:
+                        raise RuntimeError("Не удалось прочитать незавершённый архив " + name)
+                    buf = Array.newInstance(Byte.TYPE, 65536)
+                    try:
+                        while True:
+                            n = inp.read(buf)
+                            if n < 0:
+                                break
+                            digest.update(bytes((int(buf[j]) & 255) for j in range(n)))
+                    finally:
+                        inp.close()
+                headers = {"User-Agent": "NS2026-Updater-Android"}
+                if offset:
+                    headers["Range"] = "bytes={}-".format(offset)
+                request = urllib.request.Request(item["browser_download_url"], headers=headers)
+                response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                status_code = getattr(response, "status", response.getcode())
+                if offset and status_code != 206:
+                    response.close()
+                    digest = hashlib.md5()
+                    offset = 0
+                    request = urllib.request.Request(item["browser_download_url"], headers={"User-Agent": "NS2026-Updater-Android"})
+                    response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                if temp is None:
+                    temp = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
+                out = resolver.openOutputStream(temp, "wa" if offset else "w")
+                if out is None:
+                    response.close()
+                    raise RuntimeError("Не удалось записать " + name)
+                got = offset
+                try:
+                    with response:
+                        while True:
+                            data = response.read(1024 * 1024)
+                            if not data:
+                                break
+                            out.write(data)
+                            digest.update(data)
+                            got += len(data)
+                            pct = 95.0 + 5.0 * (extra_done + got - offset) / extra_total
+                            Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
                     out.flush()
-                finally: out.close()
-                if got != int(item.get('size') or 0):
-                    Docs.deleteDocument(resolver,temp)
-                    raise RuntimeError('Размер файла '+name+' не совпал. Повреждённый файл удалён.')
-                if digest.hexdigest().lower()!=item['expected_md5']:
-                    Docs.deleteDocument(resolver,temp)
-                    raise RuntimeError('MD5 не совпал для '+name+'. Повреждённый файл удалён.')
-                old=find(folder,name)
-                if old is not None: Docs.deleteDocument(resolver,old)
-                if Docs.renameDocument(resolver,temp,name) is None: raise RuntimeError('Не удалось завершить '+name)
-                item['downloaded']=True; extra_done+=got
-            Clock.schedule_once(lambda dt:self._download_done(),0)
+                finally:
+                    out.close()
+                if got != expected_size:
+                    raise RuntimeError("Размер файла {} не совпал. Незавершённый файл сохранён.".format(name))
+                if digest.hexdigest().lower() != expected_hash:
+                    raise RuntimeError("MD5 файла {} не совпал. Файл сохранён для повторной проверки.".format(name))
+                old = find(folder, name)
+                if old is not None:
+                    if not self._saf_delete(resolver, Docs, old):
+                        raise RuntimeError("Не удалось заменить старый архив " + name)
+                if Docs.renameDocument(resolver, temp, name) is None:
+                    raise RuntimeError("Не удалось завершить " + name)
+                item["downloaded"] = True
+                extra_done += got
+
+            Clock.schedule_once(lambda dt: self._download_done(), 0)
         except Exception as exc:
-            error=friendly_network_error(exc)
-            Clock.schedule_once(lambda dt,e=error:self._download_failed(e),0)
+            error = friendly_network_error(exc)
+            Clock.schedule_once(lambda dt, e=error: self._download_failed(e), 0)
     def _download_progress(self, percent, name, received):
         self.progress.value = min(100, percent)
         self._set_status("Хабар доставляется… {:.0f}%".format(min(100, percent)))
