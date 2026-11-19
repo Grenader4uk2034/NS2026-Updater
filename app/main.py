@@ -289,6 +289,20 @@ class UpdaterApp(App):
                     cursor.close()
                 return None
 
+            # The user selects Download once. Create/use Download/NC OGSR
+            # automatically and place the four finished archives inside it.
+            output_folder = find_child("NC OGSR")
+            if output_folder is None:
+                output_folder = Docs.createDocument(
+                    resolver, parent, "vnd.android.document/directory", "NC OGSR"
+                )
+            if output_folder is None:
+                raise RuntimeError("Не удалось автоматически создать папку NC OGSR внутри Download.")
+            parent = output_folder
+            children_uri = Docs.buildChildDocumentsUriUsingTree(
+                tree, Docs.getDocumentId(output_folder)
+            )
+
             def rename_checked(uri, new_name, description):
                 renamed = Docs.renameDocument(resolver, uri, new_name)
                 if renamed is None:
@@ -702,121 +716,123 @@ class UpdaterApp(App):
             state_path = base_path + ".state"
             chunk_hashes = [item["expected_md5"] for item in chunks]
 
-            # A journal records only fully verified and appended parts. If the
-            # process died during append, truncate to the last committed byte.
-            state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": chunk_hashes}
-            if os.path.isfile(assembling) and os.path.isfile(state_path):
-                try:
-                    with open(state_path, "r", encoding="utf-8") as source:
-                        saved = json.load(source)
-                    if saved.get("chunks_md5") == chunk_hashes and not saved.get("complete"):
-                        state.update(saved)
-                except Exception:
-                    pass
-            next_chunk = int(state.get("next_chunk", 0))
-            committed = int(state.get("committed_bytes", 0))
-            if next_chunk < 0 or next_chunk > len(chunks) or committed < 0:
-                next_chunk, committed = 0, 0
-            mode = "r+b" if os.path.isfile(assembling) else "w+b"
-            with open(assembling, mode) as output:
-                output.truncate(committed)
-                output.seek(committed)
-                total_bytes = sum(int(item.get("size") or 0) for item in chunks)
-                completed_bytes = committed
-
-                for index in range(next_chunk, len(chunks)):
-                    item = chunks[index]
-                    name = item["name"]
-                    temporary = os.path.join(self.download_dir, name + ".part")
-                    expected = item["expected_md5"]
-                    url = item.get("browser_download_url")
-                    if not url:
-                        raise RuntimeError("У части {} нет ссылки загрузки.".format(name))
-
-                    # Keep a resumable .part file. Resume only when the server
-                    # confirms HTTP 206; otherwise restart that part safely.
-                    offset = os.path.getsize(temporary) if os.path.isfile(temporary) else 0
-                    headers = {"User-Agent": "NS2026-Updater-Android"}
-                    if offset:
-                        headers["Range"] = "bytes={}-".format(offset)
-                    request = urllib.request.Request(url, headers=headers)
-                    response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
-                    if offset and getattr(response, "status", response.getcode()) != 206:
-                        response.close()
-                        offset = 0
-                        request = urllib.request.Request(
-                            url, headers={"User-Agent": "NS2026-Updater-Android"}
-                        )
+            if not base.get("downloaded"):
+                # A journal records only fully verified and appended parts. If the
+                # process died during append, truncate to the last committed byte.
+                state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": chunk_hashes}
+                if os.path.isfile(assembling) and os.path.isfile(state_path):
+                    try:
+                        with open(state_path, "r", encoding="utf-8") as source:
+                            saved = json.load(source)
+                        if saved.get("chunks_md5") == chunk_hashes and not saved.get("complete"):
+                            state.update(saved)
+                    except Exception:
+                        pass
+                next_chunk = int(state.get("next_chunk", 0))
+                committed = int(state.get("committed_bytes", 0))
+                if next_chunk < 0 or next_chunk > len(chunks) or committed < 0:
+                    next_chunk, committed = 0, 0
+                mode = "r+b" if os.path.isfile(assembling) else "w+b"
+                with open(assembling, mode) as output:
+                    output.truncate(committed)
+                    output.seek(committed)
+                    total_bytes = sum(int(item.get("size") or 0) for item in chunks)
+                    completed_bytes = committed
+    
+                    for index in range(next_chunk, len(chunks)):
+                        item = chunks[index]
+                        name = item["name"]
+                        temporary = os.path.join(self.download_dir, name + ".part")
+                        expected = item["expected_md5"]
+                        url = item.get("browser_download_url")
+                        if not url:
+                            raise RuntimeError("У части {} нет ссылки загрузки.".format(name))
+    
+                        # Keep a resumable .part file. Resume only when the server
+                        # confirms HTTP 206; otherwise restart that part safely.
+                        offset = os.path.getsize(temporary) if os.path.isfile(temporary) else 0
+                        headers = {"User-Agent": "NS2026-Updater-Android"}
+                        if offset:
+                            headers["Range"] = "bytes={}-".format(offset)
+                        request = urllib.request.Request(url, headers=headers)
                         response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
-
-                    digest = hashlib.md5()
-                    if offset:
-                        with open(temporary, "rb") as existing:
-                            for old_chunk in iter(lambda: existing.read(1024 * 1024), b""):
-                                digest.update(old_chunk)
-                    received = offset
-                    with response:
-                        with open(temporary, "ab" if offset else "wb") as part_file:
-                            while True:
-                                data = response.read(1024 * 1024)
-                                if not data:
-                                    break
-                                part_file.write(data)
-                                digest.update(data)
-                                received += len(data)
-                                percent = (completed_bytes + received - offset) * 100.0 / max(1, total_bytes)
-                                Clock.schedule_once(
-                                    lambda dt, p=percent, n=name, r=received:
-                                        self._download_progress(p, n, r), 0
-                                )
-                            part_file.flush()
-                            os.fsync(part_file.fileno())
-
-                    if digest.hexdigest().lower() != expected:
-                        try:
-                            os.remove(temporary)
-                        except OSError:
-                            pass
-                        raise RuntimeError("MD5 не совпал для {}. Часть удалена; запустите загрузку повторно.".format(name))
-
-                    # Append only after the entire part has passed MD5.
-                    with open(temporary, "rb") as part_file:
-                        shutil.copyfileobj(part_file, output, 1024 * 1024)
-                    output.flush()
-                    os.fsync(output.fileno())
-                    committed += received
-                    completed_bytes += received - offset
-                    state = {
-                        "next_chunk": index + 1,
-                        "committed_bytes": committed,
-                        "chunks_md5": chunk_hashes,
-                        "complete": False,
-                    }
-                    with open(state_path, "w", encoding="utf-8") as journal:
-                        json.dump(state, journal)
-                        journal.flush()
-                        os.fsync(journal.fileno())
-                    os.remove(temporary)
-                    Clock.schedule_once(
-                        lambda dt, n=index + 1:
-                            self._set_status("Проверено и добавлено частей: {}/17".format(n)), 0
-                    )
-
-            assembled_md5 = self._md5(assembling)
-            os.replace(assembling, base_path)
-            state = {
-                "next_chunk": len(chunks),
-                "committed_bytes": os.path.getsize(base_path),
-                "chunks_md5": chunk_hashes,
-                "assembled_md5": assembled_md5,
-                "complete": True,
-            }
-            with open(state_path, "w", encoding="utf-8") as journal:
-                json.dump(state, journal)
-            base["assembled_md5"] = assembled_md5
-            base["expected_md5"] = assembled_md5
-            base["downloaded"] = True
-
+                        if offset and getattr(response, "status", response.getcode()) != 206:
+                            response.close()
+                            offset = 0
+                            request = urllib.request.Request(
+                                url, headers={"User-Agent": "NS2026-Updater-Android"}
+                            )
+                            response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+    
+                        digest = hashlib.md5()
+                        if offset:
+                            with open(temporary, "rb") as existing:
+                                for old_chunk in iter(lambda: existing.read(1024 * 1024), b""):
+                                    digest.update(old_chunk)
+                        received = offset
+                        with response:
+                            with open(temporary, "ab" if offset else "wb") as part_file:
+                                while True:
+                                    data = response.read(1024 * 1024)
+                                    if not data:
+                                        break
+                                    part_file.write(data)
+                                    digest.update(data)
+                                    received += len(data)
+                                    percent = (completed_bytes + received - offset) * 100.0 / max(1, total_bytes)
+                                    Clock.schedule_once(
+                                        lambda dt, p=percent, n=name, r=received:
+                                            self._download_progress(p, n, r), 0
+                                    )
+                                part_file.flush()
+                                os.fsync(part_file.fileno())
+    
+                        if digest.hexdigest().lower() != expected:
+                            try:
+                                os.remove(temporary)
+                            except OSError:
+                                pass
+                            raise RuntimeError("MD5 не совпал для {}. Часть удалена; запустите загрузку повторно.".format(name))
+    
+                        # Append only after the entire part has passed MD5.
+                        with open(temporary, "rb") as part_file:
+                            shutil.copyfileobj(part_file, output, 1024 * 1024)
+                        output.flush()
+                        os.fsync(output.fileno())
+                        committed += received
+                        completed_bytes += received - offset
+                        state = {
+                            "next_chunk": index + 1,
+                            "committed_bytes": committed,
+                            "chunks_md5": chunk_hashes,
+                            "complete": False,
+                        }
+                        with open(state_path, "w", encoding="utf-8") as journal:
+                            json.dump(state, journal)
+                            journal.flush()
+                            os.fsync(journal.fileno())
+                        os.remove(temporary)
+                        Clock.schedule_once(
+                            lambda dt, n=index + 1:
+                                self._set_status("Проверено и добавлено частей: {}/17".format(n)), 0
+                        )
+    
+                assembled_md5 = self._md5(assembling)
+                os.replace(assembling, base_path)
+                state = {
+                    "next_chunk": len(chunks),
+                    "committed_bytes": os.path.getsize(base_path),
+                    "chunks_md5": chunk_hashes,
+                    "assembled_md5": assembled_md5,
+                    "complete": True,
+                }
+                with open(state_path, "w", encoding="utf-8") as journal:
+                    json.dump(state, journal)
+                base["assembled_md5"] = assembled_md5
+                base["expected_md5"] = assembled_md5
+                base["downloaded"] = True
+    
+    
             # Download and verify the three independent archives afterwards.
             extras = [self.assets[name] for name in REQUIRED_ASSETS[1:] if not self.assets[name].get("downloaded")]
             extras_total = sum(int(item["size"]) for item in extras)
