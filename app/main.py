@@ -24,6 +24,7 @@ from kivy.uix.scrollview import ScrollView
 OWNER = "D1m0n93"
 REPOSITORY = "NS_OGSR_Resourses"
 RELEASE_TAG = "latest"
+MANIFEST_URL = "https://raw.githubusercontent.com/D1m0n93/NS_OGSR_Resourses/Public/index.json"
 RELEASE_API = (
     "https://api.github.com/repos/"
     + OWNER + "/" + REPOSITORY + "/releases/tags/" + RELEASE_TAG
@@ -328,17 +329,13 @@ class UpdaterApp(App):
                     source.close()
                     output.close()
 
-                if copied != int(asset["size"]):
-                    raise RuntimeError("Размер после копирования не совпал: " + name)
-
-                # Read the staged document back through SAF and verify the
-                # bytes actually stored by the document provider.
-                expected_digest = (asset.get("digest") or "").lower()
-                if expected_digest.startswith("sha256:"):
+                # Read staged SAF document back and verify its manifest MD5.
+                expected_digest = (asset.get("expected_md5") or "").lower()
+                if len(expected_digest) == 32:
                     verify_stream = resolver.openInputStream(temp_uri)
                     if verify_stream is None:
                         raise RuntimeError("Не удалось проверить записанный файл: " + name)
-                    verified_digest = hashlib.sha256()
+                    verified_digest = hashlib.md5()
                     verified_size = 0
                     try:
                         verify_buffer = jarray("b")([0] * 65536)
@@ -354,13 +351,8 @@ class UpdaterApp(App):
                     finally:
                         verify_stream.close()
 
-                    if verified_size != int(asset["size"]):
-                        raise RuntimeError(
-                            "Размер файла в папке игры не совпал после записи: " + name
-                        )
                     actual_digest = verified_digest.hexdigest().lower()
-                    expected_hex = expected_digest.split(":", 1)[1]
-                    if actual_digest != expected_hex:
+                    if actual_digest != expected_digest:
                         raise RuntimeError(
                             "SHA-256 записанного файла не совпал: " + name
                         )
@@ -575,6 +567,21 @@ class UpdaterApp(App):
 
     def _check_worker(self):
         try:
+            with http_open(MANIFEST_URL, "application/json") as response:
+                manifest = json.loads(response.read().decode("utf-8"))
+            expected_hashes = {}
+            for entry in manifest.get("update_files", []):
+                parts = entry.split(" ", 1)
+                if len(parts) != 2:
+                    continue
+                hashes = parts[0].split(";")
+                filename = parts[1].replace("\\\\", "/").split("/")[-1]
+                if len(hashes) >= 1 and filename in REQUIRED_ASSETS:
+                    expected_hashes[filename] = hashes[0].lower()
+            missing_hashes = [name for name in REQUIRED_ASSETS if name not in expected_hashes
+            ]
+            if missing_hashes:
+                raise RuntimeError("В index.json отсутствуют MD5: " + ", ".join(missing_hashes))
             with http_open(RELEASE_API, "application/vnd.github+json") as response:
                 release = json.loads(response.read().decode("utf-8"))
 
@@ -593,6 +600,7 @@ class UpdaterApp(App):
                 )
 
             for name, asset in found.items():
+                asset["expected_md5"] = expected_hashes[name]
                 asset["downloaded"] = self._is_cached(asset)
 
             self.release = release
@@ -620,26 +628,8 @@ class UpdaterApp(App):
         path = os.path.join(self.download_dir, asset["name"])
         if not os.path.isfile(path):
             return False
-        if os.path.getsize(path) != int(asset.get("size", -1)):
-            return False
-
-        digest = asset.get("digest") or ""
-        if digest.startswith("sha256:"):
-            return self._sha256(path) == digest.split(":", 1)[1].lower()
-
-        # Without a published checksum, the GitHub asset ID and timestamp
-        # are stored beside the cached file to identify the exact release asset.
-        meta_path = path + ".json"
-        try:
-            with open(meta_path, "r", encoding="utf-8") as stream:
-                metadata = json.load(stream)
-            return (
-                metadata.get("id") == asset.get("id")
-                and metadata.get("updated_at") == asset.get("updated_at")
-                and metadata.get("size") == asset.get("size")
-            )
-        except Exception:
-            return False
+        expected = (asset.get("expected_md5") or "").lower()
+        return len(expected) == 32 and self._md5(path) == expected
 
     def _check_done(self, message):
         self._render_assets()
@@ -693,14 +683,8 @@ class UpdaterApp(App):
                     headers={"User-Agent": "NS2026-Updater-Android"},
                 )
                 with urllib.request.urlopen(request, timeout=90, context=NETWORK_CONTEXT) as response:
-                    response_length = response.headers.get("Content-Length")
-                    if response_length and int(response_length) != int(asset["size"]):
-                        raise RuntimeError(
-                            "GitHub сообщил неожиданный размер файла {}.".format(name)
-                        )
-
-                    received = 0
-                    digest = hashlib.sha256()
+                        received = 0
+                    digest = hashlib.md5()
                     with open(temporary, "wb") as output:
                         while True:
                             chunk = response.read(1024 * 1024)
@@ -720,27 +704,11 @@ class UpdaterApp(App):
                                 0,
                             )
 
-                if received != int(asset["size"]):
-                    raise RuntimeError(
-                        "Размер {} не совпал: получено {}, ожидалось {}.".format(
-                            name, received, asset["size"]
-                        )
-                    )
-
-                expected = asset.get("digest") or ""
-                if expected.startswith("sha256:"):
-                    if digest.hexdigest().lower() != expected.split(":", 1)[1].lower():
-                        raise RuntimeError("SHA-256 не совпал для {}.".format(name))
+                expected = (asset.get("expected_md5") or "").lower()
+                if len(expected) != 32 or digest.hexdigest().lower() != expected:
+                    raise RuntimeError("MD5 не совпал для {}. Файл не принят.".format(name))
 
                 os.replace(temporary, target)
-                with open(target + ".json", "w", encoding="utf-8") as meta:
-                    json.dump({
-                        "id": asset.get("id"),
-                        "updated_at": asset.get("updated_at"),
-                        "size": asset.get("size"),
-                        "digest": asset.get("digest"),
-                    }, meta, ensure_ascii=False)
-
                 asset["downloaded"] = True
                 completed_bytes += received
 
@@ -771,8 +739,8 @@ class UpdaterApp(App):
         )
 
     @staticmethod
-    def _sha256(path):
-        digest = hashlib.sha256()
+    def _md5(path):
+        digest = hashlib.md5()
         with open(path, "rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
