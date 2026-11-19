@@ -186,9 +186,7 @@ class UpdaterApp(App):
             height=dp(30),
         )
         root.add_widget(self.footer)
-        root.add_widget(self.footer)
 
-        self._render_assets()
         self._refresh_folder_ui()
         return root
 
@@ -234,7 +232,7 @@ class UpdaterApp(App):
             intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
             PythonActivity.mActivity.startActivityForResult(intent, self.request_tree_code)
-            self._set_status("Выберите Download либо уже созданную NC OGSR.")
+            self._set_status("Выберите созданную папку NSOGSR внутри Download.")
         except Exception as exc:
             self._set_status("Не удалось открыть выбор папки: " + str(exc))
 
