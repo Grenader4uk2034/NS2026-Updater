@@ -150,10 +150,6 @@ class UpdaterApp(App):
         self.folder_button.bind(on_press=self.choose_game_folder)
         root.add_widget(self.folder_button)
 
-        self.install_button = Button(text="СОХРАНИТЬ В ВЫБРАННУЮ ПАПКУ", size_hint_y=None, height=dp(54), disabled=True)
-        self.install_button.bind(on_press=self.install_updates)
-        root.add_widget(self.install_button)
-
         self.check_button = Button(
             text="ПРОВЕРИТЬ ОБНОВЛЕНИЯ",
             size_hint_y=None,
@@ -178,7 +174,7 @@ class UpdaterApp(App):
         root.add_widget(self.download_button)
 
         self.footer = Label(
-            text="Укажите папку Download на телефоне. Программа создаст NC OGSR автоматически.",
+            text="Выберите Download. Архивы будут скачиваться сразу в Download/NC OGSR.",
             color=(0.58, 0.62, 0.56, 1),
             font_size="11sp",
             size_hint_y=None,
@@ -222,9 +218,7 @@ class UpdaterApp(App):
 
     def _refresh_folder_ui(self):
         if hasattr(self, "footer"):
-            self.footer.text = "Папка Download выбрана. Папка NC OGSR будет создана при сохранении." if self.tree_uri else "Папка Download не выбрана"
-        if hasattr(self, "install_button"):
-            self.install_button.disabled = self.busy or not self.tree_uri or not self._all_assets_cached()
+            self.footer.text = "Download выбрана. Загрузка пойдёт сразу в Download/NC OGSR." if self.tree_uri else "Сначала выберите папку Download."
 
     def choose_game_folder(self, instance):
         try:
@@ -260,287 +254,6 @@ class UpdaterApp(App):
             self._refresh_folder_ui()
             self._set_status("Не удалось сохранить доступ: " + str(exc))
 
-    def install_updates(self, instance):
-        if self.busy or not self.tree_uri or not self._all_assets_cached():
-            return
-        self._set_busy(True)
-        self.progress.value = 0
-        self._set_status("Установка архивов в выбранную папку…")
-        threading.Thread(target=self._install_worker, daemon=True).start()
-
-    def _install_worker(self):
-        """Stage every archive first; keep all backups until every promotion succeeds."""
-        from_uri = None
-        staged = {}
-        backups = {}
-        promoted = []
-        resolver = None
-        Docs = None
-
-        try:
-            from jnius import autoclass
-            Uri = autoclass("android.net.Uri")
-            Docs = autoclass("android.provider.DocumentsContract")
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
-            FileInputStream = autoclass("java.io.FileInputStream")
-            JavaArray = autoclass("java.lang.reflect.Array")
-            JavaByte = autoclass("java.lang.Byte")
-            activity = PythonActivity.mActivity
-            resolver = activity.getContentResolver()
-            tree = Uri.parse(self.tree_uri)
-            tree_id = Docs.getTreeDocumentId(tree)
-            parent = Docs.buildDocumentUriUsingTree(tree, tree_id)
-            children_uri = Docs.buildChildDocumentsUriUsingTree(tree, tree_id)
-
-            def find_child(filename):
-                cursor = resolver.query(children_uri, None, None, None, None)
-                if cursor is None:
-                    raise RuntimeError("Не удалось прочитать выбранную папку.")
-                try:
-                    name_col = cursor.getColumnIndex("_display_name")
-                    id_col = cursor.getColumnIndex("document_id")
-                    if name_col < 0 or id_col < 0:
-                        raise RuntimeError("Провайдер папки не вернул имя или ID файла.")
-                    while cursor.moveToNext():
-                        if cursor.getString(name_col) == filename:
-                            return Docs.buildDocumentUriUsingTree(
-                                tree, cursor.getString(id_col)
-                            )
-                finally:
-                    cursor.close()
-                return None
-
-            # The user selects Download once. Create/use Download/NC OGSR
-            # automatically and place the four finished archives inside it.
-            output_folder = find_child("NC OGSR")
-            if output_folder is None:
-                output_folder = Docs.createDocument(
-                    resolver, parent, "vnd.android.document/directory", "NC OGSR"
-                )
-            if output_folder is None:
-                raise RuntimeError("Не удалось автоматически создать папку NC OGSR внутри Download.")
-            parent = output_folder
-            children_uri = Docs.buildChildDocumentsUriUsingTree(
-                tree, Docs.getDocumentId(output_folder)
-            )
-
-            def rename_checked(uri, new_name, description):
-                renamed = Docs.renameDocument(resolver, uri, new_name)
-                if renamed is None:
-                    raise RuntimeError(description + ": провайдер не поддержал переименование.")
-                result = find_child(new_name)
-                if result is None:
-                    raise RuntimeError(description + ": файл после переименования не найден.")
-                return result
-
-            # Phase 1: copy and size-check all new files without touching originals.
-            for index, name in enumerate(REQUIRED_ASSETS):
-                asset = self.assets[name]
-                local_path = os.path.join(self.download_dir, name)
-                if not self._is_cached(asset):
-                    raise RuntimeError("Архив не прошёл проверку: " + name)
-
-                temp_name = "." + name + ".ns2026.tmp"
-                if find_child(temp_name) is not None:
-                    raise RuntimeError(
-                        "Найден временный файл от предыдущей установки: " + temp_name
-                        + ". Удалите его вручную или выберите папку без старых временных файлов."
-                    )
-                temp_uri = Docs.createDocument(
-                    resolver, parent, "application/octet-stream", temp_name
-                )
-                if temp_uri is None:
-                    raise RuntimeError("Не удалось создать временный файл: " + name)
-
-                staged[name] = {"uri": temp_uri, "temp_name": temp_name}
-                output = resolver.openOutputStream(temp_uri, "w")
-                if output is None:
-                    raise RuntimeError("Нет доступа на запись: " + name)
-                source = FileInputStream(local_path)
-                copied = 0
-                try:
-                    buffer = JavaArray.newInstance(JavaByte.TYPE, 65536)
-                    while True:
-                        count = source.read(buffer)
-                        if count < 0:
-                            break
-                        output.write(buffer, 0, count)
-                        copied += count
-                    output.flush()
-                finally:
-                    source.close()
-                    output.close()
-
-                # Read staged SAF document back and verify its manifest MD5.
-                expected_digest = (asset.get("expected_md5") or asset.get("assembled_md5") or "").lower()
-                if len(expected_digest) != 32:
-                    raise RuntimeError("В манифесте нет MD5 для " + name)
-                if len(expected_digest) == 32:
-                    verify_stream = resolver.openInputStream(temp_uri)
-                    if verify_stream is None:
-                        raise RuntimeError("Не удалось проверить записанный файл: " + name)
-                    verified_digest = hashlib.md5()
-                    verified_size = 0
-                    try:
-                        verify_buffer = JavaArray.newInstance(JavaByte.TYPE, 65536)
-                        while True:
-                            count = verify_stream.read(verify_buffer)
-                            if count < 0:
-                                break
-                            verified_digest.update(bytes(
-                                (int(verify_buffer[i]) & 0xff)
-                                for i in range(count)
-                            ))
-                            verified_size += count
-                    finally:
-                        verify_stream.close()
-
-                    actual_digest = verified_digest.hexdigest().lower()
-                    if actual_digest != expected_digest:
-                        raise RuntimeError(
-                            "MD5 записанного файла не совпал: " + name
-                        )
-
-                percent = (index + 1) * 35.0 / len(REQUIRED_ASSETS)
-                Clock.schedule_once(
-                    lambda dt, p=percent, n=name:
-                        self._install_progress(p, "Подготовлен: " + n), 0
-                )
-
-            # Phase 2: move every existing original to a backup. Do not delete
-            # any backup until all three new archives have been promoted.
-            for name in REQUIRED_ASSETS:
-                old_uri = find_child(name)
-                if old_uri is None:
-                    continue
-                backup_name = name + ".ns2026.bak"
-                if find_child(backup_name) is not None:
-                    raise RuntimeError(
-                        "Уже существует резервная копия " + backup_name
-                        + ". Она сохранена; автоматическая установка остановлена."
-                    )
-                backup_uri = Docs.renameDocument(resolver, old_uri, backup_name)
-                if backup_uri is None:
-                    raise RuntimeError(
-                        "Не удалось сохранить прежний архив " + name
-                        + ": провайдер не поддержал переименование."
-                    )
-                # Record the backup immediately so even a later query failure
-                # cannot leave the original stranded under its backup name.
-                backups[name] = backup_uri
-                if find_child(backup_name) is None:
-                    raise RuntimeError(
-                        "Резервная копия не найдена после переименования: " + backup_name
-                    )
-
-            # Phase 3: promote staged files. Track each success for rollback.
-            for index, name in enumerate(REQUIRED_ASSETS):
-                installed_uri = Docs.renameDocument(
-                    resolver, staged[name]["uri"], name
-                )
-                if installed_uri is None:
-                    raise RuntimeError(
-                        "Не удалось установить " + name
-                        + ": провайдер не поддержал переименование."
-                    )
-                # Record promotion before querying the provider, so rollback
-                # can remove the new file even if the subsequent query fails.
-                staged[name]["installed_uri"] = installed_uri
-                promoted.append(name)
-                if find_child(name) is None:
-                    raise RuntimeError(
-                        "Файл не найден после установки: " + name
-                    )
-                percent = 35.0 + (index + 1) * 65.0 / len(REQUIRED_ASSETS)
-                Clock.schedule_once(
-                    lambda dt, p=percent, n=name:
-                        self._install_progress(p, "Установлен: " + n), 0
-                )
-
-            # Commit point: only now may backups be removed.
-            cleanup_errors = []
-            for name, backup_uri in backups.items():
-                try:
-                    if not Docs.deleteDocument(resolver, backup_uri):
-                        cleanup_errors.append(name + ".ns2026.bak")
-                except Exception:
-                    cleanup_errors.append(name + ".ns2026.bak")
-
-            if cleanup_errors:
-                Clock.schedule_once(
-                    lambda dt, files=", ".join(cleanup_errors):
-                        self._install_done_with_backups(files), 0
-                )
-            else:
-                Clock.schedule_once(lambda dt: self._install_done(), 0)
-
-        except Exception as exc:
-            rollback_errors = []
-            if resolver is not None and Docs is not None:
-                # Remove newly installed files first, then restore every original.
-                for name in reversed(promoted):
-                    try:
-                        current = find_child(name)
-                        if current is not None and not Docs.deleteDocument(resolver, current):
-                            rollback_errors.append("не удалось удалить новый " + name)
-                    except Exception as rollback_exc:
-                        rollback_errors.append(name + ": " + str(rollback_exc))
-
-                for name, backup_uri in reversed(list(backups.items())):
-                    try:
-                        if find_child(name) is not None:
-                            rollback_errors.append(
-                                "оригинал " + name + " уже существует; резервная копия сохранена"
-                            )
-                            continue
-                        rename_checked(
-                            backup_uri, name, "Не удалось восстановить " + name
-                        )
-                    except Exception as rollback_exc:
-                        rollback_errors.append(name + ": " + str(rollback_exc))
-
-                # Remove only temporary files; never delete backups on failure.
-                for name, info in staged.items():
-                    try:
-                        if name not in promoted:
-                            temp_uri = find_child(info["temp_name"])
-                            if temp_uri is not None:
-                                Docs.deleteDocument(resolver, temp_uri)
-                    except Exception as rollback_exc:
-                        rollback_errors.append(
-                            "временный файл " + name + ": " + str(rollback_exc)
-                        )
-
-            error = str(exc)
-            if rollback_errors:
-                error += "\\nОШИБКИ ОТКАТА: " + "; ".join(rollback_errors)
-                error += "\\nРезервные копии .ns2026.bak не удаляйте."
-            Clock.schedule_once(lambda dt, e=error: self._install_failed(e), 0)
-
-    def _install_progress(self, percent, name):
-        self.progress.value = percent
-        self._set_status("Установлен: " + name)
-
-    def _install_done(self):
-        self.progress.value = 100
-        self._set_status("Готово. Четыре архива установлены в выбранную папку.")
-        self._set_busy(False)
-        self._refresh_folder_ui()
-
-    def _install_done_with_backups(self, files):
-        self.progress.value = 100
-        self._set_status(
-            "Все четыре архива установлены. Старые копии сохранены: "
-            + files + ". Удалите их вручную после проверки игры."
-        )
-        self._set_busy(False)
-        self._refresh_folder_ui()
-
-    def _install_failed(self, error):
-        self._set_status("Ошибка установки: " + error)
-        self._set_busy(False)
-        self._refresh_folder_ui()
-
     def _fit_label(self, widget, size):
         widget.text_size = (size[0] - dp(12), None)
 
@@ -552,7 +265,6 @@ class UpdaterApp(App):
         self.check_button.disabled = value
         self.download_button.disabled = value or not any(not item.get("downloaded") for item in self.assets.values())
         self.folder_button.disabled = value
-        self.install_button.disabled = value or not self.tree_uri or not self._all_assets_cached()
 
     def _render_assets(self):
         self.asset_list.clear_widgets()
