@@ -29,10 +29,17 @@ RELEASE_API = (
     "https://api.github.com/repos/"
     + OWNER + "/" + REPOSITORY + "/releases/tags/" + RELEASE_TAG
 )
+BASE_ASSET = "gamedata.sq_base"
+BASE_CHUNK_COUNT = 17
 REQUIRED_ASSETS = (
+    BASE_ASSET,
     "gamedata.sq_base_configs",
     "gamedata.sq_patch",
     "gamedata.sq_patch_2",
+)
+CHUNK_NAMES = tuple(
+    "{}.part_{:03d}".format(BASE_ASSET, index)
+    for index in range(1, BASE_CHUNK_COUNT + 1)
 )
 
 
@@ -139,11 +146,11 @@ class UpdaterApp(App):
         self.progress = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(8))
         root.add_widget(self.progress)
 
-        self.folder_button = Button(text="ВЫБРАТЬ ПАПКУ ИГРЫ", size_hint_y=None, height=dp(48))
+        self.folder_button = Button(text="ВЫБРАТЬ ПАПКУ DOWNLOAD", size_hint_y=None, height=dp(48))
         self.folder_button.bind(on_press=self.choose_game_folder)
         root.add_widget(self.folder_button)
 
-        self.install_button = Button(text="УСТАНОВИТЬ В ПАПКУ ИГРЫ", size_hint_y=None, height=dp(54), disabled=True)
+        self.install_button = Button(text="СОХРАНИТЬ В ВЫБРАННУЮ ПАПКУ", size_hint_y=None, height=dp(54), disabled=True)
         self.install_button.bind(on_press=self.install_updates)
         root.add_widget(self.install_button)
 
@@ -171,7 +178,7 @@ class UpdaterApp(App):
         root.add_widget(self.download_button)
 
         self.footer = Label(
-            text="Сначала выберите папку игры",
+            text="Укажите папку Download на телефоне. Программа создаст NC OGSR автоматически.",
             color=(0.58, 0.62, 0.56, 1),
             font_size="11sp",
             size_hint_y=None,
@@ -196,7 +203,7 @@ class UpdaterApp(App):
 
     def _refresh_folder_ui(self):
         if hasattr(self, "footer"):
-            self.footer.text = "Папка игры выбрана. Доступ сохранён." if self.tree_uri else "Папка игры не выбрана"
+            self.footer.text = "Папка Download выбрана. Папка NC OGSR будет создана при сохранении." if self.tree_uri else "Папка Download не выбрана"
         if hasattr(self, "install_button"):
             self.install_button.disabled = self.busy or not self.tree_uri or not self._all_assets_cached()
 
@@ -208,7 +215,7 @@ class UpdaterApp(App):
             intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
             PythonActivity.mActivity.startActivityForResult(intent, self.request_tree_code)
-            self._set_status("Выберите папку с игровыми архивами.")
+            self._set_status("Выберите папку Download на телефоне.")
         except Exception as exc:
             self._set_status("Не удалось открыть выбор папки: " + str(exc))
 
@@ -228,7 +235,7 @@ class UpdaterApp(App):
             with open(os.path.join(self.user_data_dir, "game_tree_uri.txt"), "w", encoding="utf-8") as target:
                 target.write(self.tree_uri)
             self._refresh_folder_ui()
-            self._set_status("Папка игры выбрана. Доступ сохранён.")
+            self._set_status("Папка Download выбрана. Доступ сохранён.")
         except Exception as exc:
             self.tree_uri = None
             self._refresh_folder_ui()
@@ -330,7 +337,7 @@ class UpdaterApp(App):
                     output.close()
 
                 # Read staged SAF document back and verify its manifest MD5.
-                expected_digest = (asset.get("expected_md5") or "").lower()
+                expected_digest = (asset.get("expected_md5") or asset.get("assembled_md5") or "").lower()
                 if len(expected_digest) != 32:
                     raise RuntimeError("В манифесте нет MD5 для " + name)
                 if len(expected_digest) == 32:
@@ -481,14 +488,14 @@ class UpdaterApp(App):
 
     def _install_done(self):
         self.progress.value = 100
-        self._set_status("Готово. Три архива установлены в папку игры.")
+        self._set_status("Готово. Четыре архива установлены в выбранную папку.")
         self._set_busy(False)
         self._refresh_folder_ui()
 
     def _install_done_with_backups(self, files):
         self.progress.value = 100
         self._set_status(
-            "Все три архива установлены. Старые копии сохранены: "
+            "Все четыре архива установлены. Старые копии сохранены: "
             + files + ". Удалите их вручную после проверки игры."
         )
         self._set_busy(False)
@@ -571,67 +578,99 @@ class UpdaterApp(App):
         try:
             with http_open(MANIFEST_URL, "application/json") as response:
                 manifest = json.loads(response.read().decode("utf-8"))
+
+            base_entry = next(
+                (entry for entry in manifest.get("base_files", [])
+                 if " gamedata.sq_base" in entry),
+                None,
+            )
+            if not base_entry or not base_entry.startswith("chunk:"):
+                raise RuntimeError("В index.json не найдены метаданные 17 частей gamedata.sq_base.")
+            metadata = base_entry[len("chunk:"):].rsplit(" ", 1)[0]
+            id_text, hash_text = metadata.split(";", 1)
+            chunk_ids = [value.strip() for value in id_text.split(",")]
+            chunk_hashes = [value.strip().lower() for value in hash_text.split(",")]
+            if len(chunk_ids) != BASE_CHUNK_COUNT or len(chunk_hashes) != BASE_CHUNK_COUNT:
+                raise RuntimeError("В манифесте должно быть ровно 17 ID и 17 MD5.")
+            if any(len(value) != 32 for value in chunk_hashes):
+                raise RuntimeError("Манифест содержит некорректную MD5 одной из частей.")
+
             expected_hashes = {}
             for entry in manifest.get("update_files", []):
                 parts = entry.split(" ", 1)
                 if len(parts) != 2:
                     continue
                 hashes = parts[0].split(";")
-                filename = parts[1].replace("\\", "/").split("/")[-1]
-                if len(hashes) >= 1 and filename in REQUIRED_ASSETS:
-                    expected_hashes[filename] = hashes[0].lower()
-            missing_hashes = [name for name in REQUIRED_ASSETS if name not in expected_hashes
-            ]
+                filename = parts[1].replace("\\\\", "/").split("/")[-1]
+                if filename in REQUIRED_ASSETS[1:] and hashes:
+                    digest = hashes[0].lower()
+                    if len(digest) == 32 and len(hashes) > 1 and hashes[1].lower() == digest:
+                        expected_hashes[filename] = digest
+            missing_hashes = [name for name in REQUIRED_ASSETS[1:] if name not in expected_hashes]
             if missing_hashes:
-                raise RuntimeError("В index.json отсутствуют MD5: " + ", ".join(missing_hashes))
+                raise RuntimeError("В index.json отсутствуют корректные MD5: " + ", ".join(missing_hashes))
+
             with http_open(RELEASE_API, "application/vnd.github+json") as response:
                 release = json.loads(response.read().decode("utf-8"))
-
             if release.get("tag_name") != RELEASE_TAG:
                 raise RuntimeError("GitHub вернул неожиданный релиз.")
 
-            found = {}
-            for item in release.get("assets", []):
-                if item.get("name") in REQUIRED_ASSETS:
-                    found[item["name"]] = item
+            release_assets = {item.get("name"): item for item in release.get("assets", [])}
+            missing_chunks = [name for name in CHUNK_NAMES if name not in release_assets]
+            missing_extra = [name for name in REQUIRED_ASSETS[1:] if name not in release_assets]
+            if missing_chunks or missing_extra:
+                missing = missing_chunks + missing_extra
+                raise RuntimeError("В релизе latest отсутствуют файлы: " + ", ".join(missing))
 
-            missing = [name for name in REQUIRED_ASSETS if name not in found]
-            if missing:
-                raise RuntimeError(
-                    "В релизе latest отсутствуют файлы: " + ", ".join(missing)
-                )
+            chunks = []
+            for index, name in enumerate(CHUNK_NAMES):
+                item = dict(release_assets[name])
+                item["expected_md5"] = chunk_hashes[index]
+                item["chunk_index"] = index
+                chunks.append(item)
 
-            for name, asset in found.items():
-                asset["expected_md5"] = expected_hashes[name]
-                asset["downloaded"] = self._is_cached(asset)
+            base_path = os.path.join(self.download_dir, BASE_ASSET)
+            state_path = base_path + ".state"
+            assembled_md5 = None
+            if os.path.isfile(base_path) and os.path.isfile(state_path):
+                try:
+                    with open(state_path, "r", encoding="utf-8") as state_file:
+                        state = json.load(state_file)
+                    if state.get("complete") and state.get("chunks_md5") == chunk_hashes:
+                        assembled_md5 = self._md5(base_path)
+                        if assembled_md5 != state.get("assembled_md5"):
+                            assembled_md5 = None
+                except Exception:
+                    assembled_md5 = None
+
+            base_size = sum(int(item.get("size") or 0) for item in chunks)
+            base_asset = {
+                "name": BASE_ASSET,
+                "size": base_size,
+                "chunks": chunks,
+                "expected_md5": assembled_md5,
+                "assembled_md5": assembled_md5,
+                "downloaded": bool(assembled_md5),
+            }
+            found = {BASE_ASSET: base_asset}
+            for name in REQUIRED_ASSETS[1:]:
+                item = dict(release_assets[name])
+                item["expected_md5"] = expected_hashes[name]
+                item["downloaded"] = self._is_cached(item)
+                found[name] = item
 
             self.release = release
             self.assets = found
             total = sum(item["size"] for item in found.values())
-            pending = sum(
-                item["size"] for item in found.values()
-                if not item["downloaded"]
-            )
+            pending = sum(item["size"] for item in found.values() if not item["downloaded"])
             release_name = release.get("name") or release.get("tag_name")
-            message = (
-                "Релиз: {}\nОпубликован: {}\nВсего: {} • К загрузке: {}"
-            ).format(
-                release_name,
-                (release.get("published_at") or "дата не указана")[:10],
-                format_size(total),
-                format_size(pending),
+            message = ("Релиз: {}\\n17 частей основного архива + 3 дополнительных файла\\nВсего: {} • К загрузке: {}").format(
+                release_name, format_size(total), format_size(pending)
             )
             Clock.schedule_once(lambda dt: self._check_done(message), 0)
         except Exception as exc:
             error = friendly_network_error(exc)
             Clock.schedule_once(lambda dt, e=error: self._check_failed(e), 0)
-
-    def _is_cached(self, asset):
-        path = os.path.join(self.download_dir, asset["name"])
-        if not os.path.isfile(path):
-            return False
-        expected = (asset.get("expected_md5") or "").lower()
-        return len(expected) == 32 and self._md5(path) == expected
 
     def _check_done(self, message):
         self._render_assets()
@@ -655,64 +694,165 @@ class UpdaterApp(App):
         threading.Thread(target=self._download_worker, daemon=True).start()
 
     def _download_worker(self):
-        pending = [
-            (name, asset) for name, asset in self.assets.items()
-            if not asset.get("downloaded")
-        ]
-        total_bytes = sum(asset["size"] for _, asset in pending)
-        completed_bytes = 0
-
         try:
-            free_bytes = shutil.disk_usage(self.download_dir).free
-            safety_margin = 100 * 1024 * 1024
-            if free_bytes < total_bytes + safety_margin:
-                raise RuntimeError(
-                    "Недостаточно свободного места. Нужно примерно {}, доступно {}.".format(
-                        format_size(total_bytes + safety_margin),
-                        format_size(free_bytes),
-                    )
-                )
+            base = self.assets[BASE_ASSET]
+            chunks = base["chunks"]
+            base_path = os.path.join(self.download_dir, BASE_ASSET)
+            assembling = base_path + ".assembling"
+            state_path = base_path + ".state"
+            chunk_hashes = [item["expected_md5"] for item in chunks]
 
-            for name, asset in pending:
+            # A journal records only fully verified and appended parts. If the
+            # process died during append, truncate to the last committed byte.
+            state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": chunk_hashes}
+            if os.path.isfile(assembling) and os.path.isfile(state_path):
+                try:
+                    with open(state_path, "r", encoding="utf-8") as source:
+                        saved = json.load(source)
+                    if saved.get("chunks_md5") == chunk_hashes and not saved.get("complete"):
+                        state.update(saved)
+                except Exception:
+                    pass
+            next_chunk = int(state.get("next_chunk", 0))
+            committed = int(state.get("committed_bytes", 0))
+            if next_chunk < 0 or next_chunk > len(chunks) or committed < 0:
+                next_chunk, committed = 0, 0
+            mode = "r+b" if os.path.isfile(assembling) else "w+b"
+            with open(assembling, mode) as output:
+                output.truncate(committed)
+                output.seek(committed)
+                total_bytes = sum(int(item.get("size") or 0) for item in chunks)
+                completed_bytes = committed
+
+                for index in range(next_chunk, len(chunks)):
+                    item = chunks[index]
+                    name = item["name"]
+                    temporary = os.path.join(self.download_dir, name + ".part")
+                    expected = item["expected_md5"]
+                    url = item.get("browser_download_url")
+                    if not url:
+                        raise RuntimeError("У части {} нет ссылки загрузки.".format(name))
+
+                    # Keep a resumable .part file. Resume only when the server
+                    # confirms HTTP 206; otherwise restart that part safely.
+                    offset = os.path.getsize(temporary) if os.path.isfile(temporary) else 0
+                    headers = {"User-Agent": "NS2026-Updater-Android"}
+                    if offset:
+                        headers["Range"] = "bytes={}-".format(offset)
+                    request = urllib.request.Request(url, headers=headers)
+                    response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+                    if offset and getattr(response, "status", response.getcode()) != 206:
+                        response.close()
+                        offset = 0
+                        request = urllib.request.Request(
+                            url, headers={"User-Agent": "NS2026-Updater-Android"}
+                        )
+                        response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
+
+                    digest = hashlib.md5()
+                    if offset:
+                        with open(temporary, "rb") as existing:
+                            for old_chunk in iter(lambda: existing.read(1024 * 1024), b""):
+                                digest.update(old_chunk)
+                    received = offset
+                    with response:
+                        with open(temporary, "ab" if offset else "wb") as part_file:
+                            while True:
+                                data = response.read(1024 * 1024)
+                                if not data:
+                                    break
+                                part_file.write(data)
+                                digest.update(data)
+                                received += len(data)
+                                percent = (completed_bytes + received - offset) * 100.0 / max(1, total_bytes)
+                                Clock.schedule_once(
+                                    lambda dt, p=percent, n=name, r=received:
+                                        self._download_progress(p, n, r), 0
+                                )
+                            part_file.flush()
+                            os.fsync(part_file.fileno())
+
+                    if digest.hexdigest().lower() != expected:
+                        try:
+                            os.remove(temporary)
+                        except OSError:
+                            pass
+                        raise RuntimeError("MD5 не совпал для {}. Часть удалена; запустите загрузку повторно.".format(name))
+
+                    # Append only after the entire part has passed MD5.
+                    with open(temporary, "rb") as part_file:
+                        shutil.copyfileobj(part_file, output, 1024 * 1024)
+                    output.flush()
+                    os.fsync(output.fileno())
+                    committed += received
+                    completed_bytes += received - offset
+                    state = {
+                        "next_chunk": index + 1,
+                        "committed_bytes": committed,
+                        "chunks_md5": chunk_hashes,
+                        "complete": False,
+                    }
+                    with open(state_path, "w", encoding="utf-8") as journal:
+                        json.dump(state, journal)
+                        journal.flush()
+                        os.fsync(journal.fileno())
+                    os.remove(temporary)
+                    Clock.schedule_once(
+                        lambda dt, n=index + 1:
+                            self._set_status("Проверено и добавлено частей: {}/17".format(n)), 0
+                    )
+
+            assembled_md5 = self._md5(assembling)
+            os.replace(assembling, base_path)
+            state = {
+                "next_chunk": len(chunks),
+                "committed_bytes": os.path.getsize(base_path),
+                "chunks_md5": chunk_hashes,
+                "assembled_md5": assembled_md5,
+                "complete": True,
+            }
+            with open(state_path, "w", encoding="utf-8") as journal:
+                json.dump(state, journal)
+            base["assembled_md5"] = assembled_md5
+            base["expected_md5"] = assembled_md5
+            base["downloaded"] = True
+
+            # Download and verify the three independent archives afterwards.
+            extras = [self.assets[name] for name in REQUIRED_ASSETS[1:] if not self.assets[name].get("downloaded")]
+            extras_total = sum(int(item["size"]) for item in extras)
+            extras_done = 0
+            for item in extras:
+                name = item["name"]
                 target = os.path.join(self.download_dir, name)
                 temporary = target + ".part"
-                url = asset.get("browser_download_url")
+                url = item.get("browser_download_url")
                 if not url:
                     raise RuntimeError("У файла {} нет ссылки загрузки.".format(name))
-
-                request = urllib.request.Request(
-                    url,
-                    headers={"User-Agent": "NS2026-Updater-Android"},
-                )
-                with urllib.request.urlopen(request, timeout=90, context=NETWORK_CONTEXT) as response:
-                    received = 0
-                    digest = hashlib.md5()
+                request = urllib.request.Request(url, headers={"User-Agent": "NS2026-Updater-Android"})
+                digest = hashlib.md5()
+                received = 0
+                with urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT) as response:
                     with open(temporary, "wb") as output:
                         while True:
-                            chunk = response.read(1024 * 1024)
-                            if not chunk:
+                            data = response.read(1024 * 1024)
+                            if not data:
                                 break
-                            output.write(chunk)
-                            digest.update(chunk)
-                            received += len(chunk)
-                            overall = completed_bytes + received
-                            percent = (
-                                overall * 100.0 / total_bytes
-                                if total_bytes else 100
-                            )
+                            output.write(data)
+                            digest.update(data)
+                            received += len(data)
+                            percent = 90 + (extras_done + received) * 10.0 / max(1, extras_total)
                             Clock.schedule_once(
                                 lambda dt, p=percent, n=name, r=received:
-                                    self._download_progress(p, n, r),
-                                0,
+                                    self._download_progress(p, n, r), 0
                             )
-
-                expected = (asset.get("expected_md5") or "").lower()
-                if len(expected) != 32 or digest.hexdigest().lower() != expected:
-                    raise RuntimeError("MD5 не совпал для {}. Файл не принят.".format(name))
-
+                        output.flush()
+                        os.fsync(output.fileno())
+                if digest.hexdigest().lower() != item["expected_md5"]:
+                    os.remove(temporary)
+                    raise RuntimeError("MD5 не совпал для {}.".format(name))
                 os.replace(temporary, target)
-                asset["downloaded"] = True
-                completed_bytes += received
+                item["downloaded"] = True
+                extras_done += received
 
             Clock.schedule_once(lambda dt: self._download_done(), 0)
         except Exception as exc:
@@ -728,7 +868,7 @@ class UpdaterApp(App):
     def _download_done(self):
         self.progress.value = 100
         self._render_assets()
-        self._set_status("Загрузка завершена. Все три архива сохранены.")
+        self._set_status("Загрузка завершена. Сформированы четыре архива; 17 частей проверены и объединены.")
         self._set_busy(False)
         self.download_button.disabled = True
 
