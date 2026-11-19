@@ -421,36 +421,30 @@ class UpdaterApp(App):
                 item["chunk_index"] = index
                 chunks.append(item)
 
-            base_path = os.path.join(self.download_dir, BASE_ASSET)
-            state_path = base_path + ".state"
+            if not self.tree_uri:
+                raise RuntimeError('Сначала выберите папку Download, чтобы проверить целевые архивы.')
+            resolver, Docs, tree, folder, find = self._saf_target()
+            state_path = os.path.join(self.user_data_dir, 'base_saf_state.json')
+            base_uri = find(folder, BASE_ASSET)
             assembled_md5 = None
-            if os.path.isfile(base_path) and os.path.isfile(state_path):
+            base_size = sum(int(item.get('size') or 0) for item in chunks)
+            if base_uri is not None and os.path.isfile(state_path):
                 try:
-                    with open(state_path, "r", encoding="utf-8") as state_file:
-                        state = json.load(state_file)
-                    if state.get("complete") and state.get("chunks_md5") == chunk_hashes:
-                        assembled_md5 = self._md5(base_path)
-                        if assembled_md5 != state.get("assembled_md5"):
-                            assembled_md5 = None
-                except Exception:
-                    assembled_md5 = None
-
-            base_size = sum(int(item.get("size") or 0) for item in chunks)
-            base_asset = {
-                "name": BASE_ASSET,
-                "size": base_size,
-                "chunks": chunks,
-                "expected_md5": assembled_md5,
-                "assembled_md5": assembled_md5,
-                "downloaded": bool(assembled_md5),
-            }
-            found = {BASE_ASSET: base_asset}
+                    with open(state_path,'r',encoding='utf-8') as sf: saved=json.load(sf)
+                    if saved.get('complete') and saved.get('chunks_md5') == chunk_hashes and self._saf_size(resolver,base_uri) == base_size:
+                        actual=self._saf_md5(resolver,base_uri)
+                        if actual == saved.get('assembled_md5'): assembled_md5=actual
+                except Exception: assembled_md5=None
+            base_asset={'name':BASE_ASSET,'size':base_size,'chunks':chunks,'expected_md5':assembled_md5,'assembled_md5':assembled_md5,'downloaded':bool(assembled_md5)}
+            found={BASE_ASSET:base_asset}
             for name in REQUIRED_ASSETS[1:]:
-                item = dict(release_assets[name])
-                item["expected_md5"] = expected_hashes[name]
-                item["downloaded"] = self._is_cached(item)
-                found[name] = item
-
+                item=dict(release_assets[name]); item['expected_md5']=expected_hashes[name]
+                existing=find(folder,name); item['downloaded']=False
+                if existing is not None:
+                    try:
+                        item['downloaded']=(self._saf_size(resolver,existing)==int(item.get('size') or 0) and self._saf_md5(resolver,existing)==item['expected_md5'])
+                    except Exception: item['downloaded']=False
+                found[name]=item
             self.release = release
             self.assets = found
             total = sum(item["size"] for item in found.values())
