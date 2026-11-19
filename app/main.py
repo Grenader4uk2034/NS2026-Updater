@@ -5,6 +5,7 @@ import os
 import shutil
 import ssl
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -20,6 +21,9 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.progressbar import ProgressBar
 from kivy.uix.scrollview import ScrollView
+from kivy.uix.floatlayout import FloatLayout
+from kivy.graphics import Color, Rectangle
+from kivy.properties import NumericProperty
 
 
 OWNER = "D1m0n93"
@@ -77,6 +81,36 @@ def http_open(url, accept="application/octet-stream"):
         },
     )
     return urllib.request.urlopen(request, timeout=45, context=NETWORK_CONTEXT)
+
+
+
+class WideProgress(FloatLayout):
+    value = NumericProperty(0)
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.size_hint_y = None
+        self.height = dp(30)
+        with self.canvas:
+            Color(0.16, 0.18, 0.14, 1)
+            self._bg_rect = Rectangle(pos=self.pos, size=self.size)
+            Color(1.0, 0.78, 0.05, 1)
+            self._fill_rect = Rectangle(pos=self.pos, size=(0, self.height))
+        self.percent_label = Label(
+            text="0%", bold=True, color=(0.08, 0.09, 0.05, 1),
+            font_size="14sp", halign="center", valign="middle"
+        )
+        self.add_widget(self.percent_label)
+        self.bind(pos=self._redraw, size=self._redraw, value=self._redraw)
+
+    def _redraw(self, *args):
+        self._bg_rect.pos = self.pos
+        self._bg_rect.size = self.size
+        self._fill_rect.pos = self.pos
+        self._fill_rect.size = (self.width * max(0, min(100, self.value)) / 100.0, self.height)
+        self.percent_label.pos = self.pos
+        self.percent_label.size = self.size
+        self.percent_label.text = "{:.0f}%".format(max(0, min(100, self.value)))
 
 
 class UpdaterApp(App):
@@ -137,7 +171,7 @@ class UpdaterApp(App):
         self.status.bind(size=self._fit_label)
         root.add_widget(self.status)
 
-        self.progress = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(8))
+        self.progress = WideProgress(value=0)
         root.add_widget(self.progress)
 
         self.folder_button = Button(text="ВЫБРАТЬ ПАПКУ NSOGSR", size_hint_y=None, height=dp(48))
@@ -536,6 +570,23 @@ class UpdaterApp(App):
             # SAF providers sometimes fail to query a URI after deleting it.
             return False
 
+    def _saf_quarantine(self, resolver, Docs, uri, original_name):
+        """Preserve a bad SAF document instead of requiring Android to delete it."""
+        if uri is None:
+            return None
+        safe = original_name.replace("/", "_")
+        quarantine_name = ".recovery_{}_{}".format(int(time.time() * 1000), safe)
+        try:
+            moved = Docs.renameDocument(resolver, uri, quarantine_name)
+            if moved is not None:
+                return moved
+        except Exception:
+            pass
+        raise RuntimeError(
+            "Android не разрешил удалить или переименовать повреждённый файл {}. "
+            "Исходник сохранён; выберите папку NSOGSR заново и повторите попытку.".format(original_name)
+        )
+
     def _saf_hash_size(self, resolver, uri):
         size = self._saf_size(resolver, uri)
         digest = self._saf_md5(resolver, uri)
@@ -591,13 +642,13 @@ class UpdaterApp(App):
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                             continue
                         if not self._saf_delete(resolver, Docs, part):
-                            raise RuntimeError("Android не разрешил удалить повреждённую временную часть {}.".format(name))
+                            self._saf_quarantine(resolver, Docs, part, temp_name)
                         part = None
                         offset = 0
     
                     if offset > expected_size:
                         if not self._saf_delete(resolver, Docs, part):
-                            raise RuntimeError("Android не разрешил убрать повреждённую временную часть {}.".format(name))
+                            self._saf_quarantine(resolver, Docs, part, temp_name)
                         part = None
                         offset = 0
     
@@ -883,7 +934,7 @@ class UpdaterApp(App):
                         extra_done += expected_size
                         continue
                     if not self._saf_delete(resolver, Docs, temp):
-                        raise RuntimeError("Android не разрешил удалить повреждённый временный файл " + name)
+                        self._saf_quarantine(resolver, Docs, temp, temp_name)
                     temp = None
                     offset = 0
 
