@@ -254,6 +254,51 @@ class UpdaterApp(App):
             self._refresh_folder_ui()
             self._set_status("Не удалось сохранить доступ: " + str(exc))
 
+    def _saf_target(self):
+        from jnius import autoclass
+        Uri = autoclass('android.net.Uri')
+        Docs = autoclass('android.provider.DocumentsContract')
+        Activity = autoclass('org.kivy.android.PythonActivity')
+        resolver = Activity.mActivity.getContentResolver()
+        tree = Uri.parse(self.tree_uri)
+        root = Docs.buildDocumentUriUsingTree(tree, Docs.getTreeDocumentId(tree))
+        def find(folder, name):
+            child_uri = Docs.buildChildDocumentsUriUsingTree(tree, Docs.getDocumentId(folder))
+            cursor = resolver.query(child_uri, None, None, None, None)
+            if cursor is None: raise RuntimeError('Не удалось прочитать Download.')
+            try:
+                ni = cursor.getColumnIndex('_display_name'); ii = cursor.getColumnIndex('document_id')
+                while cursor.moveToNext():
+                    if cursor.getString(ni) == name:
+                        return Docs.buildDocumentUriUsingTree(tree, cursor.getString(ii))
+            finally: cursor.close()
+            return None
+        folder = find(root, 'NC OGSR')
+        if folder is None: folder = Docs.createDocument(resolver, root, 'vnd.android.document/directory', 'NC OGSR')
+        if folder is None: raise RuntimeError('Не удалось создать Download/NC OGSR.')
+        return resolver, Docs, tree, folder, find
+
+    def _saf_size(self, resolver, uri):
+        cursor = resolver.query(uri, None, None, None, None)
+        if cursor is None: return 0
+        try:
+            col = cursor.getColumnIndex('_size')
+            return int(cursor.getLong(col)) if col >= 0 and cursor.moveToFirst() else 0
+        finally: cursor.close()
+
+    def _saf_md5(self, resolver, uri):
+        from jnius import autoclass
+        Array = autoclass('java.lang.reflect.Array'); Byte = autoclass('java.lang.Byte')
+        stream = resolver.openInputStream(uri)
+        if stream is None: raise RuntimeError('Не удалось прочитать архив для MD5.')
+        digest = hashlib.md5(); buf = Array.newInstance(Byte.TYPE, 65536)
+        try:
+            while True:
+                n = stream.read(buf)
+                if n < 0: break
+                digest.update(bytes((int(buf[i]) & 255) for i in range(n)))
+        finally: stream.close()
+        return digest.hexdigest()
     def _fit_label(self, widget, size):
         widget.text_size = (size[0] - dp(12), None)
 
