@@ -64,6 +64,26 @@ def ssl_context():
 
 NETWORK_CONTEXT = ssl_context()
 
+# Four GitHub release mirrors used by the original updater.
+RELEASE_MIRRORS = ("https://ghproxy.net/", "https://ghfast.top/", "https://gh.llkk.cc/", "https://gh-proxy.com/")
+
+def mirror_url(original_url, mirror_index=0):
+    return RELEASE_MIRRORS[mirror_index % len(RELEASE_MIRRORS)] + original_url
+
+def urlopen_mirrors(request, timeout=120, start_index=0, per_mirror_attempts=2):
+    last_error = None
+    for offset in range(len(RELEASE_MIRRORS)):
+        mirror_index = (start_index + offset) % len(RELEASE_MIRRORS)
+        mirrored_request = urllib.request.Request(mirror_url(request.full_url, mirror_index), headers=dict(request.header_items()), method=request.get_method())
+        for attempt in range(per_mirror_attempts):
+            try:
+                return urllib.request.urlopen(mirrored_request, timeout=timeout, context=NETWORK_CONTEXT), mirror_index
+            except (OSError, urllib.error.URLError, TimeoutError) as exc:
+                last_error = exc
+                if attempt + 1 < per_mirror_attempts:
+                    time.sleep(min(2 ** attempt, 4))
+    raise last_error
+
 
 def friendly_network_error(error):
     if isinstance(error, (ssl.SSLError, urllib.error.URLError)) and "CERTIFICATE_VERIFY_FAILED" in str(error):
@@ -771,7 +791,7 @@ class UpdaterApp(App):
                         if got:
                             headers["Range"] = "bytes={}-".format(got)
                         request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                        response = urlopen_retry(request, timeout=60, attempts=4)
+                        response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=stream_attempt, per_mirror_attempts=2)
                         status_code = getattr(response, "status", response.getcode())
                         if got and status_code != 206:
                             response.close()
@@ -780,7 +800,7 @@ class UpdaterApp(App):
                             offset = 0
                             headers = {"User-Agent": "NS2026-Updater-Android"}
                             request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                            response = urlopen_retry(request, timeout=60, attempts=4)
+                            response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=mirror_index + 1, per_mirror_attempts=2)
                         out = resolver.openOutputStream(part, "wa" if got else "w")
                         if out is None:
                             response.close()
@@ -799,8 +819,8 @@ class UpdaterApp(App):
                             out.flush()
                         except (OSError, urllib.error.URLError, TimeoutError) as stream_exc:
                             stream_attempt += 1
-                            if stream_attempt >= 4:
-                                raise RuntimeError("Связь оборвалась после 4 попыток. Прогресс части сохранён: {} байт. {}".format(got, stream_exc))
+                            if stream_attempt >= len(RELEASE_MIRRORS):
+                                raise RuntimeError("Все 4 зеркала оборвали связь после попыток. Прогресс части сохранён: {} байт. {}".format(got, stream_exc))
                             Clock.schedule_once(lambda dt, n=name, a=stream_attempt: self._download_status("Связь прервана. Повтор {} из 3 • {}".format(a, n)), 0)
                             time.sleep(min(2 ** stream_attempt, 8))
                             continue
@@ -1051,14 +1071,14 @@ class UpdaterApp(App):
                 if offset:
                     headers["Range"] = "bytes={}-".format(offset)
                 request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                response = urlopen_retry(request, timeout=120, attempts=4)
+                response, mirror_index = urlopen_mirrors(request, timeout=120, start_index=0, per_mirror_attempts=2)
                 status_code = getattr(response, "status", response.getcode())
                 if offset and status_code != 206:
                     response.close()
                     digest = hashlib.md5()
                     offset = 0
                     request = urllib.request.Request(item["browser_download_url"], headers={"User-Agent": "NS2026-Updater-Android"})
-                    response = urlopen_retry(request, timeout=120, attempts=4)
+                    response, mirror_index = urlopen_mirrors(request, timeout=120, start_index=mirror_index + 1, per_mirror_attempts=2)
                 if temp is None:
                     temp = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
                 try:
