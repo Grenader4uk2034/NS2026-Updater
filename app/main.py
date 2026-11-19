@@ -331,6 +331,8 @@ class UpdaterApp(App):
 
                 # Read staged SAF document back and verify its manifest MD5.
                 expected_digest = (asset.get("expected_md5") or "").lower()
+                if len(expected_digest) != 32:
+                    raise RuntimeError("В манифесте нет MD5 для " + name)
                 if len(expected_digest) == 32:
                     verify_stream = resolver.openInputStream(temp_uri)
                     if verify_stream is None:
@@ -575,7 +577,7 @@ class UpdaterApp(App):
                 if len(parts) != 2:
                     continue
                 hashes = parts[0].split(";")
-                filename = parts[1].replace("\\\\", "/").split("/")[-1]
+                filename = parts[1].replace("\\", "/").split("/")[-1]
                 if len(hashes) >= 1 and filename in REQUIRED_ASSETS:
                     expected_hashes[filename] = hashes[0].lower()
             missing_hashes = [name for name in REQUIRED_ASSETS if name not in expected_hashes
