@@ -5,7 +5,6 @@ import os
 import shutil
 import ssl
 import threading
-import time
 import urllib.error
 import urllib.request
 
@@ -519,7 +518,7 @@ class UpdaterApp(App):
                 message = "Хабар обнаружен!\nВес хабара: {}".format(format_size(pending))
                 signal_state = "online"
             else:
-                message = "В Зоне затишье.\\nВсе архивы уже на месте."
+                message = "В Зоне затишье.\nВсе архивы уже на месте."
                 signal_state = "idle"
             Clock.schedule_once(lambda dt, m=message, st=signal_state: self._check_done(m, st), 0)
         except Exception as exc:
@@ -536,7 +535,7 @@ class UpdaterApp(App):
 
     def _check_failed(self, error):
         self._set_signal("offline")
-        self._set_status("Связи с Зоной нет.\\n" + error)
+        self._set_status("Связи с Зоной нет.\n" + error)
         self._set_busy(False)
         self.download_button.disabled = True
 
@@ -571,23 +570,6 @@ class UpdaterApp(App):
         except Exception:
             # SAF providers sometimes fail to query a URI after deleting it.
             return False
-
-    def _saf_quarantine(self, resolver, Docs, uri, original_name):
-        """Preserve a bad SAF document instead of requiring Android to delete it."""
-        if uri is None:
-            return None
-        safe = original_name.replace("/", "_")
-        quarantine_name = ".recovery_{}_{}".format(int(time.time() * 1000), safe)
-        try:
-            moved = Docs.renameDocument(resolver, uri, quarantine_name)
-            if moved is not None:
-                return moved
-        except Exception:
-            pass
-        raise RuntimeError(
-            "Android не разрешил удалить или переименовать повреждённый файл {}. "
-            "Исходник сохранён; выберите папку NSOGSR заново и повторите попытку.".format(original_name)
-        )
 
     def _saf_hash_size(self, resolver, uri):
         size = self._saf_size(resolver, uri)
@@ -650,15 +632,12 @@ class UpdaterApp(App):
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                             continue
-                        if not self._saf_delete(resolver, Docs, part):
-                            self._saf_quarantine(resolver, Docs, part, temp_name)
-                        part = None
+                        # Reuse the same SAF document and truncate it in place.
+                        # This avoids keeping a second multi-GB recovery copy.
                         offset = 0
     
                     if offset > expected_size:
-                        if not self._saf_delete(resolver, Docs, part):
-                            self._saf_quarantine(resolver, Docs, part, temp_name)
-                        part = None
+                        # Reuse the existing document; output mode "w" truncates it.
                         offset = 0
     
                     digest = hashlib.md5()
@@ -942,15 +921,12 @@ class UpdaterApp(App):
                         item["downloaded"] = True
                         extra_done += expected_size
                         continue
-                    if not self._saf_delete(resolver, Docs, temp):
-                        self._saf_quarantine(resolver, Docs, temp, temp_name)
-                    temp = None
+                    # Reuse and truncate this document instead of creating a
+                    # duplicate archive if Android refuses SAF deletion.
                     offset = 0
 
                 if offset > expected_size:
-                    if not self._saf_delete(resolver, Docs, temp):
-                        raise RuntimeError("Android не разрешил удалить повреждённый временный файл " + name)
-                    temp = None
+                    # Existing temp document will be truncated in place below.
                     offset = 0
                 if offset and temp is not None:
                     inp = resolver.openInputStream(temp)
@@ -979,10 +955,20 @@ class UpdaterApp(App):
                     response = urllib.request.urlopen(request, timeout=120, context=NETWORK_CONTEXT)
                 if temp is None:
                     temp = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
-                out = resolver.openOutputStream(temp, "wa" if offset else "w")
+                try:
+                    out = resolver.openOutputStream(temp, "wa" if offset else "w")
+                except Exception as exc:
+                    response.close()
+                    raise RuntimeError(
+                        "Android не разрешил перезаписать временный файл {}. "
+                        "Другие загруженные части сохранены. Причина: {}".format(name, exc)
+                    )
                 if out is None:
                     response.close()
-                    raise RuntimeError("Не удалось записать " + name)
+                    raise RuntimeError(
+                        "Android не разрешил открыть временный файл {} для записи. "
+                        "Другие загруженные части сохранены.".format(name)
+                    )
                 got = offset
                 try:
                     with response:
@@ -1028,13 +1014,13 @@ class UpdaterApp(App):
     def _download_done(self):
         self.progress.value = 100
         self._set_signal("online")
-        self._set_status("Хабар доставлен!\\nВсе архивы проверены и готовы.")
+        self._set_status("Хабар доставлен!\nВсе архивы проверены и готовы.")
         self._set_busy(False)
         self.download_button.disabled = True
 
     def _download_failed(self, error):
         self._set_signal("offline")
-        self._set_status("Доставка хабара прервана.\\n" + error)
+        self._set_status("Доставка хабара прервана.\n" + error)
         self._set_busy(False)
         self.download_button.disabled = not any(
             not item.get("downloaded") for item in self.assets.values()
