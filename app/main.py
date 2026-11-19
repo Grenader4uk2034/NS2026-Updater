@@ -11,6 +11,7 @@ import urllib.request
 import certifi
 
 from kivy.app import App
+from kivy.animation import Animation
 from kivy.clock import Clock
 from kivy.core.window import Window
 from kivy.metrics import dp
@@ -113,40 +114,44 @@ class UpdaterApp(App):
         )
         root.add_widget(heading)
 
-        root.add_widget(Label(
-            text="ЦЕНТР ОБНОВЛЕНИЯ",
-            color=(0.72, 0.78, 0.66, 1),
-            font_size="16sp",
+        author = Label(
+            text='Создано Гренычем для фанатов\\n[color=9aaa85][ref=telegram]@Grenader4uk[/ref][/color] • специально для stalker-mobile.ru',
+            markup=True,
+            halign="center",
+            font_size="12sp",
             size_hint_y=None,
-            height=dp(28),
-        ))
+            height=dp(44),
+        )
+        author.bind(on_ref_press=self._open_telegram)
+        root.add_widget(author)
+
+        self.signal = Label(
+            text="[color=9aaa85][b]●[/b][/color]",
+            markup=True,
+            font_size="25sp",
+            size_hint_y=None,
+            height=dp(32),
+        )
+        root.add_widget(self.signal)
+        self.signal_animation = Animation(opacity=0.25, duration=0.65) + Animation(opacity=1, duration=0.65)
+        self.signal_animation.repeat = True
+        self.signal_animation.start(self.signal)
 
         self.status = Label(
-            text="Источник: GitHub / {}\nНажмите «Проверить обновления»".format(REPOSITORY),
+            text="Нажмите «Проверить обновления»",
             halign="center",
             valign="middle",
-            font_size="14sp",
+            font_size="15sp",
             size_hint_y=None,
-            height=dp(62),
+            height=dp(78),
         )
         self.status.bind(size=self._fit_label)
         root.add_widget(self.status)
 
-        self.asset_list = BoxLayout(
-            orientation="vertical",
-            spacing=dp(8),
-            size_hint_y=None,
-        )
-        self.asset_list.bind(minimum_height=self.asset_list.setter("height"))
-
-        scroll = ScrollView(do_scroll_x=False)
-        scroll.add_widget(self.asset_list)
-        root.add_widget(scroll)
-
         self.progress = ProgressBar(max=100, value=0, size_hint_y=None, height=dp(8))
         root.add_widget(self.progress)
 
-        self.folder_button = Button(text="ВЫБРАТЬ ПАПКУ DOWNLOAD", size_hint_y=None, height=dp(48))
+        self.folder_button = Button(text="ВЫБРАТЬ ПАПКУ NSOGSR", size_hint_y=None, height=dp(48))
         self.folder_button.bind(on_press=self.choose_game_folder)
         root.add_widget(self.folder_button)
 
@@ -174,12 +179,13 @@ class UpdaterApp(App):
         root.add_widget(self.download_button)
 
         self.footer = Label(
-            text="Выберите Download. Архивы будут скачиваться сразу в Download/NC OGSR.",
+            text="Создайте NSOGSR в Download и выберите именно эту папку.",
             color=(0.58, 0.62, 0.56, 1),
             font_size="11sp",
             size_hint_y=None,
             height=dp(30),
         )
+        root.add_widget(self.footer)
         root.add_widget(self.footer)
 
         self._render_assets()
@@ -218,7 +224,7 @@ class UpdaterApp(App):
 
     def _refresh_folder_ui(self):
         if hasattr(self, "footer"):
-            self.footer.text = "Загрузка пойдёт в выбранную NC OGSR или создаст её в Download." if self.tree_uri else "Выберите Download или папку NC OGSR."
+            self.footer.text = "Папка NSOGSR выбрана. Файлы сохраняются прямо сюда." if self.tree_uri else "Создайте NSOGSR в Download и выберите именно эту папку."
 
     def choose_game_folder(self, instance):
         try:
@@ -248,54 +254,74 @@ class UpdaterApp(App):
             with open(os.path.join(self.user_data_dir, "game_tree_uri.txt"), "w", encoding="utf-8") as target:
                 target.write(self.tree_uri)
             self._refresh_folder_ui()
-            self._set_status("Папка выбрана. Доступ сохранён; вложенная NC OGSR не создаётся.")
+            self._set_signal("idle")
+            self._set_status("Папка NSOGSR выбрана. Доступ сохранён.")
         except Exception as exc:
             self.tree_uri = None
             self._refresh_folder_ui()
+            self._set_signal("offline")
             self._set_status("Не удалось сохранить доступ: " + str(exc))
+
+    def _set_signal(self, state):
+        if not hasattr(self, "signal"):
+            return
+        colors = {"online": "9aaa85", "offline": "bd5146", "idle": "777d75"}
+        self.signal.text = "[color={}][b]●[/b][/color]".format(colors.get(state, colors["idle"]))
+        self.signal_animation.cancel(self.signal)
+        if state == "online":
+            self.signal_animation.start(self.signal)
+        else:
+            self.signal.opacity = 1
+
+    def _open_telegram(self, instance, ref):
+        try:
+            from jnius import autoclass
+            Intent = autoclass("android.content.Intent")
+            Uri = autoclass("android.net.Uri")
+            Activity = autoclass("org.kivy.android.PythonActivity")
+            intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/Grenader4uk"))
+            Activity.mActivity.startActivity(intent)
+        except Exception:
+            self._set_status("Telegram: @Grenader4uk")
 
     def _saf_target(self):
         from jnius import autoclass
-        Uri = autoclass('android.net.Uri')
-        Docs = autoclass('android.provider.DocumentsContract')
-        Activity = autoclass('org.kivy.android.PythonActivity')
+        Uri = autoclass("android.net.Uri")
+        Docs = autoclass("android.provider.DocumentsContract")
+        Activity = autoclass("org.kivy.android.PythonActivity")
         resolver = Activity.mActivity.getContentResolver()
         tree = Uri.parse(self.tree_uri)
         root = Docs.buildDocumentUriUsingTree(tree, Docs.getTreeDocumentId(tree))
+        root_name = None
+        cursor = resolver.query(root, None, None, None, None)
+        if cursor is not None:
+            try:
+                name_col = cursor.getColumnIndex("_display_name")
+                if name_col < 0:
+                    name_col = cursor.getColumnIndex("display_name")
+                if name_col >= 0 and cursor.moveToFirst():
+                    root_name = cursor.getString(name_col)
+            finally:
+                cursor.close()
+        if root_name != "NSOGSR":
+            raise RuntimeError("Выбрана неправильная папка. Нужна именно NSOGSR внутри Download.")
         def find(folder, name):
             child_uri = Docs.buildChildDocumentsUriUsingTree(tree, Docs.getDocumentId(folder))
             cursor = resolver.query(child_uri, None, None, None, None)
-            if cursor is None: raise RuntimeError('Не удалось прочитать Download.')
+            if cursor is None:
+                raise RuntimeError("Не удалось прочитать папку NSOGSR.")
             try:
-                ni = cursor.getColumnIndex('_display_name'); ii = cursor.getColumnIndex('document_id')
+                ni = cursor.getColumnIndex("_display_name")
+                ii = cursor.getColumnIndex("document_id")
                 if ni < 0 or ii < 0:
-                    raise RuntimeError('Провайдер Download не вернул имена документов. Выберите папку через системный файловый менеджер.')
+                    raise RuntimeError("Провайдер не вернул нужные поля документов.")
                 while cursor.moveToNext():
                     if cursor.getString(ni) == name:
                         return Docs.buildDocumentUriUsingTree(tree, cursor.getString(ii))
-            finally: cursor.close()
-            return None
-        # Detect whether the user selected Download itself or NC OGSR.
-        # Use an already-selected NC OGSR as-is; never create a nested duplicate.
-        root_name = None
-        root_cursor = resolver.query(root, None, None, None, None)
-        if root_cursor is not None:
-            try:
-                name_col = root_cursor.getColumnIndex('_display_name')
-                if name_col < 0:
-                    name_col = root_cursor.getColumnIndex('display_name')
-                if name_col >= 0 and root_cursor.moveToFirst():
-                    root_name = root_cursor.getString(name_col)
             finally:
-                root_cursor.close()
-        if root_name == 'NC OGSR':
-            folder = root
-        else:
-            folder = find(root, 'NC OGSR')
-            if folder is None:
-                folder = Docs.createDocument(resolver, root, 'vnd.android.document/directory', 'NC OGSR')
-        if folder is None: raise RuntimeError('Не удалось создать Download/NC OGSR.')
-        return resolver, Docs, tree, folder, find
+                cursor.close()
+            return None
+        return resolver, Docs, tree, root, find
 
     def _saf_size(self, resolver, uri):
         cursor = resolver.query(uri, None, None, None, None)
@@ -384,7 +410,7 @@ class UpdaterApp(App):
             return
         self._set_busy(True)
         self.progress.value = 0
-        self._set_status("Подключение к GitHub…")
+        self._set_status("Проверяем, есть ли свежий хабарь…")
         threading.Thread(target=self._check_worker, daemon=True).start()
 
     def _check_worker(self):
@@ -470,17 +496,19 @@ class UpdaterApp(App):
             self.assets = found
             total = sum(item["size"] for item in found.values())
             pending = sum(item["size"] for item in found.values() if not item["downloaded"])
-            release_name = release.get("name") or release.get("tag_name")
-            message = ("Релиз: {}\\n17 частей основного архива + 3 дополнительных файла\\nВсего: {} • К загрузке: {}").format(
-                release_name, format_size(total), format_size(pending)
-            )
-            Clock.schedule_once(lambda dt: self._check_done(message), 0)
+            if pending > 0:
+                message = "Хабар обнаружен!\\nВес хабаря: {}".format(format_size(pending))
+                signal_state = "online"
+            else:
+                message = "В Зоне затишье.\\nВсе архивы уже на месте."
+                signal_state = "idle"
+            Clock.schedule_once(lambda dt, m=message, st=signal_state: self._check_done(m, st), 0)
         except Exception as exc:
             error = friendly_network_error(exc)
             Clock.schedule_once(lambda dt, e=error: self._check_failed(e), 0)
 
-    def _check_done(self, message):
-        self._render_assets()
+    def _check_done(self, message, signal_state="online"):
+        self._set_signal(signal_state)
         self._set_status(message)
         self._set_busy(False)
         self.download_button.disabled = not any(
@@ -488,7 +516,8 @@ class UpdaterApp(App):
         )
 
     def _check_failed(self, error):
-        self._set_status("Не удалось проверить обновления:\n" + error)
+        self._set_signal("offline")
+        self._set_status("Связи с Зоной нет.\\n" + error)
         self._set_busy(False)
         self.download_button.disabled = True
 
@@ -497,7 +526,8 @@ class UpdaterApp(App):
             return
         self._set_busy(True)
         self.progress.value = 0
-        self._set_status("Подготовка прямой загрузки в Download/NC OGSR…")
+        self._set_signal("online")
+        self._set_status("Подготовка к доставке хабаря…")
         threading.Thread(target=self._download_worker, daemon=True).start()
 
     def _download_worker(self):
@@ -615,21 +645,19 @@ class UpdaterApp(App):
             Clock.schedule_once(lambda dt,e=error:self._download_failed(e),0)
     def _download_progress(self, percent, name, received):
         self.progress.value = min(100, percent)
-        self._set_status(
-            "Загрузка: {}\nПолучено: {}".format(name, format_size(received))
-        )
+        self._set_status("Хабар доставляется… {:.0f}%".format(min(100, percent)))
 
     def _download_done(self):
         self.progress.value = 100
-        self._render_assets()
-        self._set_status("Готово. Четыре архива уже находятся в Download/NC OGSR; 17 частей проверены и объединены.")
+        self._set_signal("online")
+        self._set_status("Хабар доставлен!\\nВсе архивы проверены и готовы.")
         self._set_busy(False)
         self.download_button.disabled = True
 
     def _download_failed(self, error):
-        self._set_status("Ошибка загрузки:\n" + error)
+        self._set_signal("offline")
+        self._set_status("Доставка хабаря прервана.\\n" + error)
         self._set_busy(False)
-        self._render_assets()
         self.download_button.disabled = not any(
             not item.get("downloaded") for item in self.assets.values()
         )
