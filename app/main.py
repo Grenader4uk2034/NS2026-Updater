@@ -840,12 +840,13 @@ class UpdaterApp(App):
                         part = Docs.createDocument(resolver, folder, "application/octet-stream", temp_name)
                     got = offset
                     stream_attempt = 0
+                    retry_start_index = preferred_mirror
                     while True:
                         headers = {"User-Agent": "NS2026-Updater-Android"}
                         if got:
                             headers["Range"] = "bytes={}-".format(got)
                         request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                        response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=(preferred_mirror if stream_attempt == 0 else stream_attempt), per_mirror_attempts=2)
+                        response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=retry_start_index, per_mirror_attempts=2)
                         status_code = getattr(response, "status", response.getcode())
                         if got and status_code != 206:
                             response.close()
@@ -872,9 +873,10 @@ class UpdaterApp(App):
                                     Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
                             out.flush()
                         except (OSError, urllib.error.URLError, TimeoutError) as stream_exc:
-                            stream_attempt = mirror_index + 1
+                            stream_attempt += 1
                             if stream_attempt >= len(RELEASE_MIRRORS):
                                 raise RuntimeError("Все 4 зеркала оборвали связь после попыток. Прогресс части сохранён: {} байт. {}".format(got, stream_exc))
+                            retry_start_index = (mirror_index + 1) % len(RELEASE_MIRRORS)
                             Clock.schedule_once(lambda dt, n=name, a=stream_attempt: self._download_status("Связь прервана. Повтор {} из 3 • {}".format(a, n)), 0)
                             time.sleep(min(2 ** stream_attempt, 8))
                             continue
