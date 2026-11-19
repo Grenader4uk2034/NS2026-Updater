@@ -218,7 +218,7 @@ class UpdaterApp(App):
 
     def _refresh_folder_ui(self):
         if hasattr(self, "footer"):
-            self.footer.text = "Download выбрана. Загрузка пойдёт сразу в Download/NC OGSR." if self.tree_uri else "Сначала выберите папку Download."
+            self.footer.text = "Загрузка пойдёт в выбранную NC OGSR или создаст её в Download." if self.tree_uri else "Выберите Download или папку NC OGSR."
 
     def choose_game_folder(self, instance):
         try:
@@ -228,7 +228,7 @@ class UpdaterApp(App):
             intent = Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
             intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)
             PythonActivity.mActivity.startActivityForResult(intent, self.request_tree_code)
-            self._set_status("Выберите папку Download на телефоне.")
+            self._set_status("Выберите Download либо уже созданную NC OGSR.")
         except Exception as exc:
             self._set_status("Не удалось открыть выбор папки: " + str(exc))
 
@@ -248,7 +248,7 @@ class UpdaterApp(App):
             with open(os.path.join(self.user_data_dir, "game_tree_uri.txt"), "w", encoding="utf-8") as target:
                 target.write(self.tree_uri)
             self._refresh_folder_ui()
-            self._set_status("Папка Download выбрана. Доступ сохранён.")
+            self._set_status("Папка выбрана. Доступ сохранён; вложенная NC OGSR не создаётся.")
         except Exception as exc:
             self.tree_uri = None
             self._refresh_folder_ui()
@@ -275,8 +275,25 @@ class UpdaterApp(App):
                         return Docs.buildDocumentUriUsingTree(tree, cursor.getString(ii))
             finally: cursor.close()
             return None
-        folder = find(root, 'NC OGSR')
-        if folder is None: folder = Docs.createDocument(resolver, root, 'vnd.android.document/directory', 'NC OGSR')
+        # Detect whether the user selected Download itself or NC OGSR.
+        # Use an already-selected NC OGSR as-is; never create a nested duplicate.
+        root_name = None
+        root_cursor = resolver.query(root, None, None, None, None)
+        if root_cursor is not None:
+            try:
+                name_col = root_cursor.getColumnIndex('_display_name')
+                if name_col < 0:
+                    name_col = root_cursor.getColumnIndex('display_name')
+                if name_col >= 0 and root_cursor.moveToFirst():
+                    root_name = root_cursor.getString(name_col)
+            finally:
+                root_cursor.close()
+        if root_name == 'NC OGSR':
+            folder = root
+        else:
+            folder = find(root, 'NC OGSR')
+            if folder is None:
+                folder = Docs.createDocument(resolver, root, 'vnd.android.document/directory', 'NC OGSR')
         if folder is None: raise RuntimeError('Не удалось создать Download/NC OGSR.')
         return resolver, Docs, tree, folder, find
 
