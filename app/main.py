@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import certifi
 
@@ -83,6 +84,35 @@ def urlopen_mirrors(request, timeout=120, start_index=0, per_mirror_attempts=2):
                 if attempt + 1 < per_mirror_attempts:
                     time.sleep(min(2 ** attempt, 4))
     raise last_error
+
+
+def probe_mirrors_speed(asset_url, probe_bytes=262144, timeout=12):
+    """Measure bounded Range transfer throughput without reading a whole asset."""
+    def probe(index):
+        req = urllib.request.Request(
+            mirror_url(asset_url, index),
+            headers={"User-Agent": "NS2026-Updater-Android", "Range": "bytes=0-{}".format(probe_bytes - 1)},
+        )
+        started = time.monotonic()
+        try:
+            response = urllib.request.urlopen(req, timeout=timeout, context=NETWORK_CONTEXT)
+            count = 0
+            try:
+                while count < probe_bytes:
+                    block = response.read(min(32768, probe_bytes - count))
+                    if not block:
+                        break
+                    count += len(block)
+            finally:
+                response.close()
+            elapsed = max(0.001, time.monotonic() - started)
+            return count / elapsed, index
+        except Exception:
+            return 0.0, index
+    with ThreadPoolExecutor(max_workers=len(RELEASE_MIRRORS)) as executor:
+        results = list(executor.map(probe, range(len(RELEASE_MIRRORS))))
+    results.sort(key=lambda item: item[0], reverse=True)
+    return results[0][1] if results and results[0][0] > 0 else 0
 
 
 def friendly_network_error(error):
@@ -423,11 +453,12 @@ class UpdaterApp(App):
         finally:
             cursor.close()
 
-    def _cached_verified(self, resolver, uri, name, size, expected_md5):
+    def _cached_verified(self, resolver, uri, name, size, expected_md5, cache_snapshot=None):
         modified = self._saf_modified(resolver, uri)
         if modified is None:
             return False
-        entry = self._load_verification_cache().get(name, {})
+        cache = cache_snapshot if cache_snapshot is not None else self._load_verification_cache()
+        entry = cache.get(name, {})
         return (
             entry.get("uri") == str(uri)
             and int(entry.get("size", -1)) == int(size)
@@ -435,6 +466,15 @@ class UpdaterApp(App):
             and entry.get("expected_md5") == expected_md5.lower()
             and entry.get("md5") == expected_md5.lower()
         )
+
+    def _verify_existing_asset(self, resolver, uri, name, size, expected_md5, cache_snapshot):
+        try:
+            if self._cached_verified(resolver, uri, name, size, expected_md5, cache_snapshot):
+                return name, True, expected_md5.lower()
+            digest = self._saf_md5(resolver, uri).lower()
+            return name, digest == expected_md5.lower(), digest
+        except Exception:
+            return name, False, None
 
     def _remember_verified(self, resolver, uri, name, size, digest, expected_md5):
         modified = self._saf_modified(resolver, uri)
@@ -611,25 +651,36 @@ class UpdaterApp(App):
                     assembled_md5 = None
             base_asset = {"name": BASE_ASSET, "size": base_size, "chunks": chunks, "expected_md5": assembled_md5, "assembled_md5": assembled_md5, "downloaded": bool(assembled_md5)}
             found = {BASE_ASSET: base_asset}
+            cache_snapshot = self._load_verification_cache()
+            check_jobs = []
             for name in REQUIRED_ASSETS[1:]:
                 item = dict(release_assets[name])
                 item["expected_md5"] = expected_hashes[name]
                 existing = find(folder, name)
                 item["downloaded"] = False
+                found[name] = item
                 if existing is not None:
                     try:
                         actual_size = self._saf_size(resolver, existing)
                         if actual_size == int(item.get("size") or 0):
-                            if self._cached_verified(resolver, existing, name, actual_size, item["expected_md5"]):
-                                item["downloaded"] = True
-                            else:
-                                actual_md5 = self._saf_md5(resolver, existing)
-                                item["downloaded"] = actual_md5 == item["expected_md5"]
-                                if item["downloaded"]:
-                                    self._remember_verified(resolver, existing, name, actual_size, actual_md5, item["expected_md5"])
+                            check_jobs.append((name, item, existing, actual_size))
                     except Exception:
-                        item["downloaded"] = False
-                found[name] = item
+                        pass
+            # Two concurrent workers balance faster verification against SAF/storage load.
+            checked = {}
+            with ThreadPoolExecutor(max_workers=min(2, max(1, len(check_jobs)))) as pool:
+                futures = [
+                    pool.submit(self._verify_existing_asset, resolver, uri, name, size, item["expected_md5"], cache_snapshot)
+                    for name, item, uri, size in check_jobs
+                ]
+                for future in as_completed(futures):
+                    name, valid, digest = future.result()
+                    checked[name] = (valid, digest)
+            for name, item, existing, actual_size in check_jobs:
+                valid, digest = checked.get(name, (False, None))
+                item["downloaded"] = valid
+                if valid and digest:
+                    self._remember_verified(resolver, existing, name, actual_size, digest, item["expected_md5"])
             self.release = release
             self.assets = found
             total = sum(item["size"] for item in found.values())
@@ -663,7 +714,7 @@ class UpdaterApp(App):
         if self.busy or not self.assets:
             return
         self._set_busy(True)
-        self.progress.value = 0
+        self.progress.value = 10
         self._set_signal("online")
         self._set_status("Подготовка к доставке хабара…")
         threading.Thread(target=self._download_worker, daemon=True).start()
@@ -717,6 +768,9 @@ class UpdaterApp(App):
             hashes = [item["expected_md5"].lower() for item in chunks]
             base_size = int(base.get("size") or 0)
 
+            Clock.schedule_once(lambda dt: self._download_status("Измеряем скорость зеркал…"), 0)
+            preferred_mirror = probe_mirrors_speed(chunks[0]["browser_download_url"])
+            Clock.schedule_once(lambda dt, i=preferred_mirror: self._download_status("Быстрейшее зеркало: №{}".format(i + 1)), 0)
             if not base.get("downloaded"):
                 # Stage 1: download and validate all 17 pieces. Keep every valid piece
                 # until the assembled archive has been verified successfully.
@@ -746,7 +800,7 @@ class UpdaterApp(App):
                             part_valid = False
                         if part_valid:
                             downloaded_bytes += expected_size
-                            pct = 75.0 * downloaded_bytes / max(1, base_size)
+                            pct = 10.0 + 55.0 * downloaded_bytes / max(1, base_size)
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                             continue
@@ -791,7 +845,7 @@ class UpdaterApp(App):
                         if got:
                             headers["Range"] = "bytes={}-".format(got)
                         request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                        response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=stream_attempt, per_mirror_attempts=2)
+                        response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=(preferred_mirror if stream_attempt == 0 else stream_attempt), per_mirror_attempts=2)
                         status_code = getattr(response, "status", response.getcode())
                         if got and status_code != 206:
                             response.close()
@@ -814,11 +868,11 @@ class UpdaterApp(App):
                                     out.write(data)
                                     digest.update(data)
                                     got += len(data)
-                                    pct = 75.0 * (downloaded_bytes + got - offset) / max(1, base_size)
+                                    pct = 10.0 + 55.0 * (downloaded_bytes + got - offset) / max(1, base_size)
                                     Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
                             out.flush()
                         except (OSError, urllib.error.URLError, TimeoutError) as stream_exc:
-                            stream_attempt += 1
+                            stream_attempt = mirror_index + 1
                             if stream_attempt >= len(RELEASE_MIRRORS):
                                 raise RuntimeError("Все 4 зеркала оборвали связь после попыток. Прогресс части сохранён: {} байт. {}".format(got, stream_exc))
                             Clock.schedule_once(lambda dt, n=name, a=stream_attempt: self._download_status("Связь прервана. Повтор {} из 3 • {}".format(a, n)), 0)
@@ -933,7 +987,7 @@ class UpdaterApp(App):
                         "complete": False,
                     }
                     self._save_chunk_state(state_path, state)
-                    pct = 75.0 + 20.0 * committed / max(1, base_size)
+                    pct = 65.0 + 20.0 * committed / max(1, base_size)
                     Clock.schedule_once(lambda dt, p=pct, n=item["name"], r=committed: self._download_progress(p, n, r), 0)
                     Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Объединено частей: {}/17".format(i)), 0)
     
@@ -1071,7 +1125,7 @@ class UpdaterApp(App):
                 if offset:
                     headers["Range"] = "bytes={}-".format(offset)
                 request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                response, mirror_index = urlopen_mirrors(request, timeout=120, start_index=0, per_mirror_attempts=2)
+                response, mirror_index = urlopen_mirrors(request, timeout=120, start_index=preferred_mirror, per_mirror_attempts=2)
                 status_code = getattr(response, "status", response.getcode())
                 if offset and status_code != 206:
                     response.close()
@@ -1105,7 +1159,7 @@ class UpdaterApp(App):
                             out.write(data)
                             digest.update(data)
                             got += len(data)
-                            pct = 95.0 + 5.0 * (extra_done + got - offset) / extra_total
+                            pct = 85.0 + 15.0 * (extra_done + got - offset) / extra_total
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
                     out.flush()
                 finally:
