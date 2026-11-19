@@ -201,6 +201,25 @@ class UpdaterApp(App):
     def _all_assets_cached(self):
         return bool(self.assets) and all(item.get("downloaded") for item in self.assets.values())
 
+    def _is_cached(self, asset):
+        """Return True only when a complete local archive matches its MD5."""
+        name = asset.get("name")
+        if not name:
+            return False
+        path = os.path.join(self.download_dir, name)
+        if not os.path.isfile(path):
+            return False
+        expected = (asset.get("expected_md5") or asset.get("assembled_md5") or "").lower()
+        if len(expected) != 32:
+            return False
+        try:
+            expected_size = int(asset.get("size") or 0)
+            if expected_size and os.path.getsize(path) != expected_size:
+                return False
+            return self._md5(path).lower() == expected
+        except (OSError, TypeError, ValueError):
+            return False
+
     def _refresh_folder_ui(self):
         if hasattr(self, "footer"):
             self.footer.text = "Папка Download выбрана. Папка NC OGSR будет создана при сохранении." if self.tree_uri else "Папка Download не выбрана"
