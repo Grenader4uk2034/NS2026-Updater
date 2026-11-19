@@ -649,12 +649,12 @@ class UpdaterApp(App):
                     finally:
                         out.close()
     
-                    if got != expected_size:
-                        raise RuntimeError("Размер части {} не совпал. Частичный файл сохранён для повторной загрузки.".format(name))
-                    if digest.hexdigest().lower() != expected_hash:
-                        raise RuntimeError("MD5 части {} не совпал. Повреждённая часть оставлена до следующей проверки.".format(name))
-                    downloaded_bytes += expected_size
-                    Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
+                if got != expected_size:
+                    raise RuntimeError("Размер части {} не совпал. Частичный файл сохранён для повторной загрузки.".format(name))
+                if digest.hexdigest().lower() != expected_hash:
+                    raise RuntimeError("MD5 части {} не совпал. Повреждённая часть оставлена до следующей проверки.".format(name))
+                downloaded_bytes += expected_size
+                Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
     
                 # Recheck the entire set before assembly so no unchecked piece enters
                 # the final archive.
