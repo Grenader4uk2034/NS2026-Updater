@@ -500,7 +500,7 @@ class UpdaterApp(App):
         if stream is None:
             raise RuntimeError('Не удалось прочитать архив для MD5.')
         digest = MessageDigest.getInstance("MD5")
-        buf = Array.newInstance(Byte.TYPE, 1024 * 1024)
+        buf = Array.newInstance(Byte.TYPE, 4 * 1024 * 1024)
         try:
             while True:
                 n = stream.read(buf)
@@ -675,7 +675,7 @@ class UpdaterApp(App):
                     except Exception:
                         pass
             # Adaptive verification: scale with CPU count, capped at 3 for SAF/storage safety.
-            worker_count = min(3, max(1, (os.cpu_count() or 2) - 1), len(check_jobs)) if check_jobs else 1
+            worker_count = min(4, max(1, (os.cpu_count() or 2) - 1), len(check_jobs)) if check_jobs else 1
             checked = {}
             total_check_bytes = sum(size for name, item, uri, size in check_jobs)
             progress_lock = threading.Lock()
