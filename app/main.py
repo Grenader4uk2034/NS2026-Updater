@@ -660,6 +660,30 @@ class UpdaterApp(App):
             base_asset = {"name": BASE_ASSET, "size": base_size, "chunks": chunks, "expected_md5": assembled_md5, "assembled_md5": assembled_md5, "downloaded": bool(assembled_md5)}
             found = {BASE_ASSET: base_asset}
             cache_snapshot = self._load_verification_cache()
+            # The Download-folder JSON is a second cache layer. Trust it only when
+            # the SAF URI, size, modified fingerprint and expected MD5 still match.
+            folder_state = self._load_folder_state(resolver, find, folder)
+            for state_name, state_entry in folder_state.get("files", {}).items():
+                if state_entry.get("status") != "verified":
+                    continue
+                expected = state_entry.get("expected_md5")
+                verified = state_entry.get("verified_md5")
+                state_uri = state_entry.get("uri")
+                if not expected or expected != verified or not state_uri:
+                    continue
+                try:
+                    state_doc = find(folder, state_name)
+                    if state_doc is None or str(state_doc) != state_uri:
+                        continue
+                    size_now = self._saf_size(resolver, state_doc)
+                    modified_now = self._saf_modified(resolver, state_doc)
+                    if size_now == int(state_entry.get("actual_size", -1)) and modified_now == state_entry.get("modified"):
+                        cache_snapshot[state_name] = {
+                            "uri": state_uri, "size": size_now, "modified": modified_now,
+                            "expected_md5": expected, "md5": verified
+                        }
+                except Exception:
+                    pass
             check_jobs = []
             for name in REQUIRED_ASSETS[1:]:
                 item = dict(release_assets[name])
@@ -849,6 +873,13 @@ class UpdaterApp(App):
             entry["verified_md5"] = digest.lower()
         if temp_name:
             entry["temp_name"] = temp_name
+        target_uri = find(folder, temp_name) if temp_name else None
+        if target_uri is None:
+            target_uri = find(folder, name)
+        if target_uri is not None:
+            current_size = self._saf_size(resolver, target_uri)
+            current_modified = self._saf_modified(resolver, target_uri)
+            entry.update({"uri": str(target_uri), "actual_size": current_size, "modified": current_modified})
         self._save_folder_state(resolver, Docs, folder, find, state)
 
     def _download_worker(self):
