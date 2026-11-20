@@ -588,6 +588,28 @@ class UpdaterApp(App):
         """Native Java MessageDigest MD5: avoid converting every SAF byte into Python."""
         return self._saf_md5_many(resolver, [uri], progress_callback)
 
+    def _saf_sha256(self, resolver, uri):
+        """Read back a SAF document and calculate SHA-256 natively for diagnostics."""
+        from jnius import autoclass
+        Array = autoclass('java.lang.reflect.Array')
+        Byte = autoclass('java.lang.Byte')
+        MessageDigest = autoclass('java.security.MessageDigest')
+        digest = MessageDigest.getInstance("SHA-256")
+        buf = Array.newInstance(Byte.TYPE, 4 * 1024 * 1024)
+        stream = resolver.openInputStream(uri)
+        if stream is None:
+            raise RuntimeError('Не удалось прочитать архив для SHA-256.')
+        try:
+            while True:
+                n = stream.read(buf)
+                if n < 0:
+                    break
+                digest.update(buf, 0, n)
+        finally:
+            stream.close()
+        raw = digest.digest()
+        return ''.join('{:02x}'.format(int(raw[i]) & 255) for i in range(len(raw)))
+
     def _saf_md5_many(self, resolver, uris, progress_callback=None):
         """MD5 of several SAF documents read back to back, computed natively."""
         from jnius import autoclass
@@ -715,7 +737,8 @@ class UpdaterApp(App):
             response.close()
 
     def _download_document(self, resolver, Docs, folder, part, temp_name, url,
-                           expected_size, expected_hash, preferred_mirror, label, report):
+                           expected_size, expected_hash, preferred_mirror, label, report,
+                           expected_sha256=None):
         """Download into a SAF temp document with resume, source rotation and a
         native MD5 check. report(got_bytes, text, force=False) feeds the bar.
         Returns the URI of the verified document."""
@@ -776,19 +799,35 @@ class UpdaterApp(App):
 
             actual_hash = self._saf_md5(resolver, part, progress_callback=on_hash).lower()
             if actual_hash == expected_hash.lower():
-                # Record explicit byte count at the verification boundary.
                 report(expected_size, "MD5 совпал: {} • {} байт".format(label, expected_size), True)
                 return part
+
+            actual_sha256 = None
+            expected_sha256 = (expected_sha256 or "").lower()
+            if len(expected_sha256) == 64:
+                # Cross-check against GitHub's independent SHA-256 asset digest.
+                actual_sha256 = self._saf_sha256(resolver, part).lower()
+                if actual_sha256 == expected_sha256:
+                    raise RuntimeError(
+                        "{}: SHA-256 совпадает с оригиналом релиза GitHub, но MD5 из "
+                        "манифеста неверна. Файл не принят. MD5 получен {}, ожидалось {}; "
+                        "SHA-256 подтверждён {}.".format(
+                            label, actual_hash, expected_hash.lower(), expected_sha256
+                        )
+                    )
+
             hash_attempt += 1
             mismatch_detail = "MD5 не совпал: {} • фактически {} байт • MD5 {} • ожидалось {}".format(
                 label, self._saf_size(resolver, part), actual_hash, expected_hash.lower()
             )
+            if actual_sha256:
+                mismatch_detail += " • SHA-256 {}".format(actual_sha256)
             part = self._saf_truncate(resolver, Docs, folder, part, temp_name)
             got = 0
             if hash_attempt >= MAX_HASH_ATTEMPTS:
                 raise RuntimeError(
-                    "{}: MD5 не совпал {} раза подряд с разных источников. Возможно, файл в релизе "
-                    "обновился — нажмите «Проверить обновления» и повторите.".format(mismatch_detail, hash_attempt)
+                    "{}: MD5 не совпал {} раза подряд с разных источников. Возможно, файл обновился "
+                    "или повреждается при загрузке. Нажмите «Проверить обновления» и повторите.".format(mismatch_detail, hash_attempt)
                 )
             mirror = (mirror + 1) % sources
             report(0, "{} • повторная загрузка через {}".format(mismatch_detail, mirror_title(mirror)), True)
@@ -909,6 +948,7 @@ class UpdaterApp(App):
             for index, name in enumerate(CHUNK_NAMES):
                 item = dict(release_assets[name])
                 item["expected_md5"] = chunk_hashes[index]
+                item["expected_sha256"] = (item.get("digest") or "").replace("sha256:", "").lower()
                 item["chunk_index"] = index
                 chunks.append(item)
 
@@ -965,6 +1005,7 @@ class UpdaterApp(App):
             for name in REQUIRED_ASSETS[1:]:
                 item = dict(release_assets[name])
                 item["expected_md5"] = expected_hashes[name]
+                item["expected_sha256"] = (item.get("digest") or "").replace("sha256:", "").lower()
                 existing = find(folder, name)
                 item["downloaded"] = False
                 found[name] = item
@@ -1239,7 +1280,8 @@ class UpdaterApp(App):
                         part = self._download_document(
                             resolver, Docs, folder, part, temp_name, item["browser_download_url"],
                             expected_size, expected_hash, preferred_mirror, label,
-                            lambda got, text, force=False, u=credited: progress.report(u + got, text, force)
+                            lambda got, text, force=False, u=credited: progress.report(u + got, text, force),
+                            expected_sha256=item.get("expected_sha256")
                         )
                         verified_uri = part
                         verified_name = temp_name
@@ -1440,7 +1482,8 @@ class UpdaterApp(App):
                     temp = self._download_document(
                         resolver, Docs, folder, temp, temp_name, item["browser_download_url"],
                         expected_size, expected_hash, preferred_mirror, label,
-                        lambda got, text, force=False, u=start: progress.report(u + got, text, force)
+                        lambda got, text, force=False, u=start: progress.report(u + got, text, force),
+                        expected_sha256=item.get("expected_sha256")
                     )
 
                 old = find(folder, name)
