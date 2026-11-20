@@ -51,11 +51,13 @@ CHUNK_NAMES = tuple(
 
 
 def format_size(value):
+    # Use decimal storage units (GB = 1,000,000,000 bytes) so 2 GB
+    # release chunks are displayed as 2.00 GB, not ~1.86 GiB.
     value = float(value)
     for unit in ("Б", "КБ", "МБ", "ГБ", "ТБ"):
-        if value < 1024 or unit == "ТБ":
+        if value < 1000 or unit == "ТБ":
             return "{:.2f} {}".format(value, unit)
-        value /= 1024
+        value /= 1000
     return "{:.2f} ТБ".format(value)
 
 
