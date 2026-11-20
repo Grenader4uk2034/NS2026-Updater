@@ -688,7 +688,7 @@ class UpdaterApp(App):
                     if now - progress_state["last_ui"] < 0.15 and done < total_check_bytes:
                         return
                     progress_state["last_ui"] = now
-                percent = 100.0 * done / max(1, total_check_bytes)
+                percent = 10.0 * done / max(1, total_check_bytes)
                 Clock.schedule_once(lambda dt, p=percent, n=name: (
                     self._set_progress(p),
                     self._set_status("Нативная MD5-проверка: {:.1f}% • {}".format(p, n))
@@ -703,7 +703,7 @@ class UpdaterApp(App):
                     name, valid, digest = future.result()
                     checked[name] = (valid, digest)
             if total_check_bytes and progress_state["bytes"] < total_check_bytes:
-                Clock.schedule_once(lambda dt: self._set_progress(100), 0)
+                Clock.schedule_once(lambda dt: self._set_progress(10), 0)
             for name, item, existing, actual_size in check_jobs:
                 valid, digest = checked.get(name, (False, None))
                 item["downloaded"] = valid
@@ -833,7 +833,7 @@ class UpdaterApp(App):
                             part_uris.append(part)
                             temporary_part_uris.append(part)
                             downloaded_bytes += expected_size
-                            pct = 10.0 + 55.0 * downloaded_bytes / max(1, base_size)
+                            pct = 10.0 + 45.0 * downloaded_bytes / max(1, base_size)
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                             continue
@@ -856,7 +856,7 @@ class UpdaterApp(App):
                                 if part is not None:
                                     temporary_part_uris.append(part)
                                 downloaded_bytes += expected_size
-                                pct = 10.0 + 55.0 * downloaded_bytes / max(1, base_size)
+                                pct = 10.0 + 45.0 * downloaded_bytes / max(1, base_size)
                                 Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                                 Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                                 continue
@@ -928,7 +928,7 @@ class UpdaterApp(App):
                                     out.write(data)
                                     digest.update(data)
                                     got += len(data)
-                                    pct = 10.0 + 55.0 * (downloaded_bytes + got - offset) / max(1, base_size)
+                                    pct = 10.0 + 45.0 * (downloaded_bytes + got - offset) / max(1, base_size)
                                     Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n + ".download", r), 0)
                             out.flush()
                         except (OSError, urllib.error.URLError, TimeoutError) as stream_exc:
@@ -1048,7 +1048,7 @@ class UpdaterApp(App):
                         "complete": False,
                     }
                     self._save_chunk_state(state_path, state)
-                    pct = 65.0 + 20.0 * committed / max(1, base_size)
+                    pct = 55.0 + 20.0 * committed / max(1, base_size)
                     Clock.schedule_once(lambda dt, p=pct, n=item["name"], r=committed: self._download_progress(p, n, r), 0)
                     Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Объединено частей: {}/17".format(i)), 0)
     
@@ -1141,7 +1141,7 @@ class UpdaterApp(App):
                 Clock.schedule_once(
                     lambda dt, n=name: self._download_status("Дополнительный архив: {}".format(n + ".download")), 0
                 )
-                temp_name = "." + name + ".download"
+                temp_name = name + ".download"
                 temp = find(folder, temp_name)
                 expected_size = int(item.get("size") or 0)
                 expected_hash = item["expected_md5"].lower()
@@ -1220,7 +1220,7 @@ class UpdaterApp(App):
                             out.write(data)
                             digest.update(data)
                             got += len(data)
-                            pct = 85.0 + 15.0 * (extra_done + got - offset) / extra_total
+                            pct = 75.0 + 25.0 * (extra_done + got - offset) / extra_total
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n + ".download", r), 0)
                     out.flush()
                 finally:
