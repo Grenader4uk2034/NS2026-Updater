@@ -783,6 +783,74 @@ class UpdaterApp(App):
             os.fsync(target.fileno())
         os.replace(temp_path, path)
 
+    def _load_folder_state(self, resolver, find, folder):
+        uri = find(folder, ".updater_state.json")
+        if uri is None:
+            return {}
+        try:
+            stream = resolver.openInputStream(uri)
+            if stream is None:
+                return {}
+            from jnius import autoclass
+            Array = autoclass("java.lang.reflect.Array")
+            Byte = autoclass("java.lang.Byte")
+            buf = Array.newInstance(Byte.TYPE, 65536)
+            data = bytearray()
+            try:
+                while True:
+                    n = stream.read(buf)
+                    if n < 0:
+                        break
+                    data.extend((int(buf[j]) & 255) for j in range(n))
+            finally:
+                stream.close()
+            value = json.loads(data.decode("utf-8"))
+            return value if isinstance(value, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_folder_state(self, resolver, Docs, folder, find, state):
+        final_name = ".updater_state.json"
+        temp_name = ".updater_state.json.tmp"
+        temp_uri = find(folder, temp_name)
+        if temp_uri is None:
+            temp_uri = Docs.createDocument(resolver, folder, "application/json", temp_name)
+        if temp_uri is None:
+            raise RuntimeError("Не удалось создать временный JSON состояния.")
+        out = resolver.openOutputStream(temp_uri, "w")
+        if out is None:
+            raise RuntimeError("Не удалось записать JSON состояния.")
+        payload = json.dumps(state, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        try:
+            out.write(payload)
+            out.flush()
+        finally:
+            out.close()
+        final_uri = find(folder, final_name)
+        if final_uri is not None:
+            backup_name = final_name + ".bak"
+            backup_uri = find(folder, backup_name)
+            if backup_uri is not None:
+                self._saf_delete(resolver, Docs, backup_uri)
+            backup_uri = Docs.renameDocument(resolver, final_uri, backup_name)
+            if backup_uri is None:
+                raise RuntimeError("Не удалось сохранить предыдущую копию JSON состояния.")
+            if Docs.renameDocument(resolver, temp_uri, final_name) is None:
+                Docs.renameDocument(resolver, backup_uri, final_name)
+                raise RuntimeError("Не удалось заменить JSON; восстановлена предыдущая версия.")
+            self._saf_delete(resolver, Docs, backup_uri)
+        elif Docs.renameDocument(resolver, temp_uri, final_name) is None:
+            raise RuntimeError("Не удалось завершить сохранение JSON состояния.")
+
+    def _folder_state_update(self, resolver, Docs, folder, find, state, name, status, actual_size=0, digest=None, temp_name=None):
+        entry = state.setdefault("files", {}).setdefault(name, {})
+        entry.update({"status": status, "actual_size": int(actual_size or 0)})
+        if digest:
+            entry["verified_md5"] = digest.lower()
+        if temp_name:
+            entry["temp_name"] = temp_name
+        self._save_folder_state(resolver, Docs, folder, find, state)
+
     def _download_worker(self):
         try:
             if not self.tree_uri:
@@ -795,6 +863,25 @@ class UpdaterApp(App):
             chunks = base["chunks"]
             hashes = [item["expected_md5"].lower() for item in chunks]
             base_size = int(base.get("size") or 0)
+            extra_assets = [self.assets[n] for n in REQUIRED_ASSETS[1:]]
+            extra_total = max(1, sum(int(x.get("size") or 0) for x in extra_assets))
+            folder_state = self._load_folder_state(resolver, find, folder)
+            folder_state.update({"schema": 1, "release": RELEASE_TAG, "manifest_url": MANIFEST_URL})
+            state_files = folder_state.setdefault("files", {})
+            for chunk in chunks:
+                state_files.setdefault(chunk["name"], {}).update({
+                    "expected_size": int(chunk.get("size") or 0),
+                    "expected_md5": chunk["expected_md5"].lower(),
+                    "status": state_files.get(chunk["name"], {}).get("status", "pending")
+                })
+            for extra in extra_assets:
+                state_files.setdefault(extra["name"], {}).update({
+                    "expected_size": int(extra.get("size") or 0),
+                    "expected_md5": extra["expected_md5"].lower(),
+                    "status": state_files.get(extra["name"], {}).get("status", "pending")
+                })
+            self._save_folder_state(resolver, Docs, folder, find, folder_state)
+            Clock.schedule_once(lambda dt: self._download_status("Состояние обновления сохранено…"), 0)
 
             Clock.schedule_once(lambda dt: self._download_status("Измеряем скорость зеркал…"), 0)
             preferred_mirror = probe_mirrors_speed(chunks[0]["browser_download_url"])
@@ -837,7 +924,7 @@ class UpdaterApp(App):
                             part_uris.append(part)
                             temporary_part_uris.append(part)
                             downloaded_bytes += expected_size
-                            pct = 10.0 + 45.0 * downloaded_bytes / max(1, base_size)
+                            pct = 10.0 + 60.0 * downloaded_bytes / max(1, base_size)
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                             continue
@@ -860,7 +947,8 @@ class UpdaterApp(App):
                                 if part is not None:
                                     temporary_part_uris.append(part)
                                 downloaded_bytes += expected_size
-                                pct = 10.0 + 45.0 * downloaded_bytes / max(1, base_size)
+                                self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", expected_size, expected_hash, name)
+                                pct = 10.0 + 60.0 * downloaded_bytes / max(1, base_size)
                                 Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                                 Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                                 continue
@@ -932,7 +1020,7 @@ class UpdaterApp(App):
                                     out.write(data)
                                     digest.update(data)
                                     got += len(data)
-                                    pct = 10.0 + 45.0 * (downloaded_bytes + got - offset) / max(1, base_size)
+                                    pct = 10.0 + 60.0 * (downloaded_bytes + got - offset) / max(1, base_size)
                                     Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n + ".download", r), 0)
                             out.flush()
                         except (OSError, urllib.error.URLError, TimeoutError) as stream_exc:
@@ -957,6 +1045,7 @@ class UpdaterApp(App):
                 if digest.hexdigest().lower() != expected_hash:
                     raise RuntimeError("MD5 части {} не совпал. Повреждённая часть оставлена до следующей проверки.".format(name))
                 self._remember_verified(resolver, part, name, expected_size, expected_hash, expected_hash)
+                self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", expected_size, expected_hash, temp_name)
                 part_uris.append(part)
                 temporary_part_uris.append(part)
                 downloaded_bytes += expected_size
@@ -1052,7 +1141,7 @@ class UpdaterApp(App):
                         "complete": False,
                     }
                     self._save_chunk_state(state_path, state)
-                    pct = 55.0 + 20.0 * committed / max(1, base_size)
+                    pct = 70.0 + 0.0 * committed / max(1, base_size)
                     Clock.schedule_once(lambda dt, p=pct, n=item["name"], r=committed: self._download_progress(p, n, r), 0)
                     Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Объединено частей: {}/17".format(i)), 0)
     
@@ -1228,7 +1317,7 @@ class UpdaterApp(App):
                             out.write(data)
                             digest.update(data)
                             got += len(data)
-                            pct = 75.0 + 25.0 * (extra_done + got - offset) / extra_total
+                            pct = 70.0 + 30.0 * (extra_done + got - offset) / extra_total
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n + ".download", r), 0)
                     out.flush()
                 finally:
@@ -1245,7 +1334,18 @@ class UpdaterApp(App):
                     raise RuntimeError("Не удалось завершить " + name)
                 item["downloaded"] = True
                 extra_done += got
+                self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", got, expected_hash, temp_name)
 
+            for asset_name, asset_item in self.assets.items():
+                if asset_item.get("downloaded"):
+                    state_files.setdefault(asset_name, {}).update({
+                        "expected_size": int(asset_item.get("size") or 0),
+                        "actual_size": int(asset_item.get("size") or 0),
+                        "expected_md5": asset_item.get("expected_md5"),
+                        "status": "verified"
+                    })
+            folder_state["last_successful_update"] = int(time.time())
+            self._save_folder_state(resolver, Docs, folder, find, folder_state)
             Clock.schedule_once(lambda dt: self._download_done(), 0)
         except Exception as exc:
             error = friendly_network_error(exc)
