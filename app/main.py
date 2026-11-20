@@ -1080,14 +1080,24 @@ class UpdaterApp(App):
                         request = urllib.request.Request(item["browser_download_url"], headers=headers)
                         response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=retry_start_index, per_mirror_attempts=2)
                         status_code = getattr(response, "status", response.getcode())
-                        if got and status_code != 206:
+                        # Accept resumed data only when the mirror confirms the exact
+                        # byte offset. A stale or incorrect 206 response corrupts MD5.
+                        content_range = response.headers.get("Content-Range", "")
+                        expected_range_prefix = "bytes {}-".format(got)
+                        if got and (
+                            status_code != 206
+                            or not content_range.startswith(expected_range_prefix)
+                        ):
                             response.close()
                             got = 0
-                            digest = hashlib.md5()
                             offset = 0
+                            digest = hashlib.md5()
                             headers = {"User-Agent": "NS2026-Updater-Android"}
                             request = urllib.request.Request(item["browser_download_url"], headers=headers)
-                            response, mirror_index = urlopen_mirrors(request, timeout=60, start_index=mirror_index + 1, per_mirror_attempts=2)
+                            response, mirror_index = urlopen_mirrors(
+                                request, timeout=60, start_index=mirror_index + 1,
+                                per_mirror_attempts=2
+                            )
                         out = resolver.openOutputStream(part, "wa" if got else "w")
                         if out is None:
                             response.close()
@@ -1124,7 +1134,22 @@ class UpdaterApp(App):
                 if got != expected_size:
                     raise RuntimeError("Размер части {} не совпал. Частичный файл сохранён для повторной загрузки.".format(name))
                 if digest.hexdigest().lower() != expected_hash:
-                    raise RuntimeError("MD5 части {} не совпал. Повреждённая часть оставлена до следующей проверки.".format(name))
+                    # A full-size but corrupt part must never be used as a resume point.
+                    try:
+                        reset_stream = resolver.openOutputStream(part, "w")
+                        if reset_stream is not None:
+                            reset_stream.flush()
+                            reset_stream.close()
+                    except Exception:
+                        pass
+                    self._folder_state_update(
+                        resolver, Docs, folder, find, folder_state, name,
+                        "pending", 0, None, temp_name
+                    )
+                    raise RuntimeError(
+                        "MD5 части {} не совпал. Повреждённая временная часть обнулена; "
+                        "при следующем запуске она скачается заново.".format(name)
+                    )
                 self._remember_verified(resolver, part, name, expected_size, expected_hash, expected_hash)
                 self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", expected_size, expected_hash, temp_name)
                 part_uris.append(part)
