@@ -924,6 +924,7 @@ class UpdaterApp(App):
                             part_uris.append(part)
                             temporary_part_uris.append(part)
                             downloaded_bytes += expected_size
+                            self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", expected_size, expected_hash, temp_name)
                             pct = 10.0 + 60.0 * downloaded_bytes / max(1, base_size)
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
@@ -1344,6 +1345,13 @@ class UpdaterApp(App):
                         "expected_md5": asset_item.get("expected_md5"),
                         "status": "verified"
                     })
+            folder_state["files"][BASE_ASSET] = {
+                "expected_size": base_size,
+                "actual_size": assembled_size,
+                "verified_md5": assembled_md5,
+                "status": "verified",
+                "parts": CHUNK_NAMES
+            }
             folder_state["last_successful_update"] = int(time.time())
             self._save_folder_state(resolver, Docs, folder, find, folder_state)
             Clock.schedule_once(lambda dt: self._download_done(), 0)
