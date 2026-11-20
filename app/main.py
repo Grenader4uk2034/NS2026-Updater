@@ -660,10 +660,21 @@ class UpdaterApp(App):
             length = (response.headers.get("Content-Length") or "").strip()
             if got:
                 content_range = (response.headers.get("Content-Range") or "").strip()
-                if status == 206 and content_range.startswith("bytes {}-".format(got)):
-                    total = content_range.rsplit("/", 1)[-1].strip()
-                    if total.isdigit() and int(total) != expected_size:
-                        raise MirrorMismatch("на источнике другой размер файла")
+                # Resume only when the server confirms the exact byte interval and
+                # the total object length. Never accept a vague/partial Range reply.
+                if status == 206:
+                    match = re.fullmatch(r"bytes (\\d+)-(\\d+)/(\\d+)", content_range)
+                    if not match:
+                        raise MirrorMismatch("некорректный Content-Range при докачке")
+                    range_start, range_end, range_total = map(int, match.groups())
+                    if range_start != got or range_end != expected_size - 1 or range_total != expected_size:
+                        raise MirrorMismatch(
+                            "Content-Range не совпадает: {} (ожидалось bytes {}-{}/{})".format(
+                                content_range, got, expected_size - 1, expected_size
+                            )
+                        )
+                    if length.isdigit() and int(length) != expected_size - got:
+                        raise MirrorMismatch("Content-Length докачки не совпадает с остатком байтов")
                 elif status == 200 and allow_restart and (not length.isdigit() or int(length) == expected_size):
                     # No source supports resume: start this file over from zero.
                     got = 0
@@ -673,7 +684,9 @@ class UpdaterApp(App):
                 if status != 200:
                     raise MirrorMismatch("неожиданный ответ сервера {}".format(status))
                 if length.isdigit() and int(length) != expected_size:
-                    raise MirrorMismatch("на источнике другой размер файла")
+                    raise MirrorMismatch(
+                        "Content-Length источника {} байт, ожидалось {} байт".format(length, expected_size)
+                    )
             out = resolver.openOutputStream(part, "wa" if got else "wt")
             if out is None:
                 raise RuntimeError("Android не разрешил записать временный файл ({}).".format(label))
@@ -760,18 +773,24 @@ class UpdaterApp(App):
                 hashed[0] += amount
                 report(got, "Проверка MD5: {} • {:.0f}%".format(label, 100.0 * hashed[0] / max(1, expected_size)))
 
-            if self._saf_md5(resolver, part, progress_callback=on_hash).lower() == expected_hash.lower():
+            actual_hash = self._saf_md5(resolver, part, progress_callback=on_hash).lower()
+            if actual_hash == expected_hash.lower():
+                # Record explicit byte count at the verification boundary.
+                report(expected_size, "MD5 совпал: {} • {} байт".format(label, expected_size), True)
                 return part
             hash_attempt += 1
+            mismatch_detail = "MD5 не совпал: {} • фактически {} байт • MD5 {} • ожидалось {}".format(
+                label, self._saf_size(resolver, part), actual_hash, expected_hash.lower()
+            )
             part = self._saf_truncate(resolver, Docs, folder, part, temp_name)
             got = 0
             if hash_attempt >= MAX_HASH_ATTEMPTS:
                 raise RuntimeError(
                     "{}: MD5 не совпал {} раза подряд с разных источников. Возможно, файл в релизе "
-                    "обновился — нажмите «Проверить обновления» и повторите.".format(label, hash_attempt)
+                    "обновился — нажмите «Проверить обновления» и повторите.".format(mismatch_detail, hash_attempt)
                 )
             mirror = (mirror + 1) % sources
-            report(0, "MD5 не совпал ({}). Качаем заново через {}".format(label, mirror_title(mirror)), True)
+            report(0, "{} • повторная загрузка через {}".format(mismatch_detail, mirror_title(mirror)), True)
     def _fit_label(self, widget, size):
         widget.text_size = (size[0] - dp(12), None)
 
