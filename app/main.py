@@ -664,7 +664,7 @@ class UpdaterApp(App):
                 # Resume only when the server confirms the exact byte interval and
                 # the total object length. Never accept a vague/partial Range reply.
                 if status == 206:
-                    match = re.fullmatch(r"bytes (\\d+)-(\\d+)/(\\d+)", content_range)
+                    match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range)
                     if not match:
                         raise MirrorMismatch("некорректный Content-Range при докачке")
                     range_start, range_end, range_total = map(int, match.groups())
