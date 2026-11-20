@@ -173,7 +173,7 @@ class WideProgress(FloatLayout):
         self._fill_rect.size = (self.width * max(0, min(100, self.value)) / 100.0, self.height)
         self.percent_label.pos = self.pos
         self.percent_label.size = self.size
-        self.percent_label.text = "{:.0f}%".format(max(0, min(100, self.value)))
+        self.percent_label.text = "{:.1f}%".format(max(0, min(100, self.value)))
 
 
 class UpdaterApp(App):
