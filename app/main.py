@@ -814,6 +814,10 @@ class UpdaterApp(App):
                     )
                     temp_name = name + ".download"
                     part = find(folder, temp_name)
+                    # Recover hidden temp documents created by older builds.
+                    legacy_temp_name = "." + name + ".download"
+                    if part is None:
+                        part = find(folder, legacy_temp_name)
                     expected_size = int(item.get("size") or 0)
                     expected_hash = item["expected_md5"].lower()
                     offset = self._saf_size(resolver, part) if part is not None else 0
@@ -1143,6 +1147,10 @@ class UpdaterApp(App):
                 )
                 temp_name = name + ".download"
                 temp = find(folder, temp_name)
+                # Recover hidden temp documents created by older builds.
+                legacy_temp_name = "." + name + ".download"
+                if temp is None:
+                    temp = find(folder, legacy_temp_name)
                 expected_size = int(item.get("size") or 0)
                 expected_hash = item["expected_md5"].lower()
                 offset = self._saf_size(resolver, temp) if temp is not None else 0
