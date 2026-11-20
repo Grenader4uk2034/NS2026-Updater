@@ -1290,6 +1290,9 @@ class UpdaterApp(App):
                             raise RuntimeError("Не удалось завершить " + name)
                         item["downloaded"] = True
                         extra_done += expected_size
+                        self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", expected_size, expected_hash, temp_name)
+                        pct = 70.0 + 30.0 * extra_done / extra_total
+                        Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                         continue
                     # Reuse and truncate this document instead of creating a
                     # duplicate archive if Android refuses SAF deletion.
