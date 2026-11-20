@@ -467,11 +467,11 @@ class UpdaterApp(App):
             and entry.get("md5") == expected_md5.lower()
         )
 
-    def _verify_existing_asset(self, resolver, uri, name, size, expected_md5, cache_snapshot):
+    def _verify_existing_asset(self, resolver, uri, name, size, expected_md5, cache_snapshot, progress_callback=None):
         try:
             if self._cached_verified(resolver, uri, name, size, expected_md5, cache_snapshot):
                 return name, True, expected_md5.lower()
-            digest = self._saf_md5(resolver, uri).lower()
+            digest = self._saf_md5(resolver, uri, progress_callback=progress_callback).lower()
             return name, digest == expected_md5.lower(), digest
         except Exception:
             return name, False, None
@@ -491,20 +491,28 @@ class UpdaterApp(App):
         self._save_verification_cache(cache)
 
     def _saf_md5(self, resolver, uri, progress_callback=None):
+        """Native Java MessageDigest MD5: avoid converting every SAF byte into Python."""
         from jnius import autoclass
-        Array = autoclass('java.lang.reflect.Array'); Byte = autoclass('java.lang.Byte')
+        Array = autoclass('java.lang.reflect.Array')
+        Byte = autoclass('java.lang.Byte')
+        MessageDigest = autoclass('java.security.MessageDigest')
         stream = resolver.openInputStream(uri)
-        if stream is None: raise RuntimeError('Не удалось прочитать архив для MD5.')
-        digest = hashlib.md5(); buf = Array.newInstance(Byte.TYPE, 1024 * 1024)
+        if stream is None:
+            raise RuntimeError('Не удалось прочитать архив для MD5.')
+        digest = MessageDigest.getInstance("MD5")
+        buf = Array.newInstance(Byte.TYPE, 1024 * 1024)
         try:
             while True:
                 n = stream.read(buf)
-                if n < 0: break
-                digest.update(bytes((int(buf[i]) & 255) for i in range(n)))
+                if n < 0:
+                    break
+                digest.update(buf, 0, n)
                 if progress_callback is not None:
                     progress_callback(n)
-        finally: stream.close()
-        return digest.hexdigest()
+        finally:
+            stream.close()
+        raw = digest.digest()
+        return ''.join('{:02x}'.format(int(raw[i]) & 255) for i in range(len(raw)))
     def _fit_label(self, widget, size):
         widget.text_size = (size[0] - dp(12), None)
 
@@ -669,16 +677,33 @@ class UpdaterApp(App):
             # Adaptive verification: scale with CPU count, capped at 3 for SAF/storage safety.
             worker_count = min(3, max(1, (os.cpu_count() or 2) - 1), len(check_jobs)) if check_jobs else 1
             checked = {}
+            total_check_bytes = sum(size for name, item, uri, size in check_jobs)
+            progress_lock = threading.Lock()
+            progress_state = {"bytes": 0, "last_ui": 0.0}
+            def hash_progress(name, amount):
+                now = time.monotonic()
+                with progress_lock:
+                    progress_state["bytes"] += amount
+                    done = progress_state["bytes"]
+                    if now - progress_state["last_ui"] < 0.15 and done < total_check_bytes:
+                        return
+                    progress_state["last_ui"] = now
+                percent = 100.0 * done / max(1, total_check_bytes)
+                Clock.schedule_once(lambda dt, p=percent, n=name: (
+                    self._set_progress(p),
+                    self._set_status("Нативная MD5-проверка: {:.1f}% • {}".format(p, n))
+                ), 0)
             with ThreadPoolExecutor(max_workers=worker_count) as pool:
                 futures = [
-                    pool.submit(self._verify_existing_asset, resolver, uri, name, size, item["expected_md5"], cache_snapshot)
+                    pool.submit(self._verify_existing_asset, resolver, uri, name, size, item["expected_md5"], cache_snapshot,
+                               lambda amount, n=name: hash_progress(n, amount))
                     for name, item, uri, size in check_jobs
                 ]
-                for completed_index, future in enumerate(as_completed(futures), 1):
+                for future in as_completed(futures):
                     name, valid, digest = future.result()
                     checked[name] = (valid, digest)
-                    check_percent = 100.0 * completed_index / max(1, len(futures))
-                    Clock.schedule_once(lambda dt, p=check_percent, n=name: (self._set_progress(p), self._set_status("Проверка архивов: {:.0f}% • {}".format(p, n))), 0)
+            if total_check_bytes and progress_state["bytes"] < total_check_bytes:
+                Clock.schedule_once(lambda dt: self._set_progress(100), 0)
             for name, item, existing, actual_size in check_jobs:
                 valid, digest = checked.get(name, (False, None))
                 item["downloaded"] = valid
