@@ -79,6 +79,12 @@ def urlopen_mirrors(request, timeout=120, start_index=0, per_mirror_attempts=2):
         for attempt in range(per_mirror_attempts):
             try:
                 return urllib.request.urlopen(mirrored_request, timeout=timeout, context=NETWORK_CONTEXT), mirror_index
+            except urllib.error.HTTPError as exc:
+                last_error = exc
+                if exc.code in (403, 429):
+                    raise
+                if attempt + 1 < per_mirror_attempts:
+                    time.sleep(min(2 ** attempt, 4))
             except (OSError, urllib.error.URLError, TimeoutError) as exc:
                 last_error = exc
                 if attempt + 1 < per_mirror_attempts:
