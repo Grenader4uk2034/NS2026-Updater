@@ -122,6 +122,10 @@ def probe_mirrors_speed(asset_url, probe_bytes=262144, timeout=12):
 
 
 def friendly_network_error(error):
+    if isinstance(error, urllib.error.HTTPError) and error.code in (403, 429):
+        retry_after = error.headers.get("Retry-After") if error.headers else None
+        suffix = " Повторите позже." if not retry_after else " Повтор через {} сек.".format(retry_after)
+        return "Сервер ограничил частоту запросов (HTTP {}). Новые запросы остановлены, чтобы не усиливать лимит.{}".format(error.code, suffix)
     if isinstance(error, (ssl.SSLError, urllib.error.URLError)) and "CERTIFICATE_VERIFY_FAILED" in str(error):
         return "Не удалось проверить SSL-сертификат сервера. Проверьте дату и время телефона, затем повторите попытку."
     return str(error)
@@ -144,6 +148,14 @@ def urlopen_retry(request, timeout=120, context=NETWORK_CONTEXT, attempts=5):
     for attempt in range(attempts):
         try:
             return urllib.request.urlopen(request, timeout=timeout, context=context)
+        except urllib.error.HTTPError as exc:
+            last_error = exc
+            # Rate limits are not transient network failures: stop retrying immediately.
+            if exc.code in (403, 429):
+                raise
+            if attempt + 1 >= attempts:
+                break
+            time.sleep(min(2 ** attempt, 16))
         except (OSError, urllib.error.URLError, TimeoutError) as exc:
             last_error = exc
             if attempt + 1 >= attempts:
@@ -419,6 +431,39 @@ class UpdaterApp(App):
             return int(cursor.getLong(col)) if col >= 0 and cursor.moveToFirst() else 0
         finally: cursor.close()
 
+    def _metadata_cache_path(self):
+        return os.path.join(self.user_data_dir, "metadata_cache.json")
+
+    def _metadata_fetch(self, key, url, accept="application/json", ttl=600):
+        """Short-lived JSON cache; use stale metadata on rate-limit errors."""
+        path = self._metadata_cache_path()
+        cache = {}
+        try:
+            with open(path, "r", encoding="utf-8") as source:
+                cache = json.load(source)
+        except (OSError, ValueError):
+            cache = {}
+        entry = cache.get(key, {})
+        cached_data = entry.get("data")
+        cached_at = float(entry.get("saved_at", 0) or 0)
+        if cached_data is not None and time.time() - cached_at < ttl:
+            return cached_data
+        try:
+            with http_open(url, accept) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            cache[key] = {"saved_at": time.time(), "data": data}
+            temp_path = path + ".tmp"
+            with open(temp_path, "w", encoding="utf-8") as target:
+                json.dump(cache, target, ensure_ascii=False)
+                target.flush()
+                os.fsync(target.fileno())
+            os.replace(temp_path, path)
+            return data
+        except urllib.error.HTTPError as exc:
+            if exc.code in (403, 429) and cached_data is not None:
+                return cached_data
+            raise
+
     def _verification_cache_path(self):
         return os.path.join(self.user_data_dir, "verified_files.json")
 
@@ -588,8 +633,7 @@ class UpdaterApp(App):
 
     def _check_worker(self):
         try:
-            with http_open(MANIFEST_URL, "application/json") as response:
-                manifest = json.loads(response.read().decode("utf-8"))
+            manifest = self._metadata_fetch("manifest", MANIFEST_URL, "application/json", ttl=600)
 
             base_entry = next(
                 (entry for entry in manifest.get("base_files", [])
@@ -622,8 +666,7 @@ class UpdaterApp(App):
             if missing_hashes:
                 raise RuntimeError("В index.json отсутствуют корректные MD5: " + ", ".join(missing_hashes))
 
-            with http_open(RELEASE_API, "application/vnd.github+json") as response:
-                release = json.loads(response.read().decode("utf-8"))
+            release = self._metadata_fetch("release", RELEASE_API, "application/vnd.github+json", ttl=600)
             if release.get("tag_name") != RELEASE_TAG:
                 raise RuntimeError("GitHub вернул неожиданный релиз.")
 
