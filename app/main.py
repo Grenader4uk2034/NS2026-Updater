@@ -812,7 +812,7 @@ class UpdaterApp(App):
                             "Проверка части {}/17: {}".format(i, n)
                         ), 0
                     )
-                    temp_name = "." + name + ".download"
+                    temp_name = name + ".download"
                     part = find(folder, temp_name)
                     expected_size = int(item.get("size") or 0)
                     expected_hash = item["expected_md5"].lower()
@@ -892,7 +892,7 @@ class UpdaterApp(App):
     
                     Clock.schedule_once(
                         lambda dt, i=idx + 1, n=name: self._download_status(
-                            "Загрузка части {}/17: {}".format(i, n)
+                            "Загрузка части {}/17: {}".format(i, n + ".download")
                         ), 0
                     )
                     if part is None:
@@ -929,7 +929,7 @@ class UpdaterApp(App):
                                     digest.update(data)
                                     got += len(data)
                                     pct = 10.0 + 55.0 * (downloaded_bytes + got - offset) / max(1, base_size)
-                                    Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
+                                    Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n + ".download", r), 0)
                             out.flush()
                         except (OSError, urllib.error.URLError, TimeoutError) as stream_exc:
                             stream_attempt += 1
@@ -982,7 +982,7 @@ class UpdaterApp(App):
                 # Stage 2: append verified chunks into a temporary assembly. Chunks
                 # are retained; checkpoints are written only after each append closes.
                 Clock.schedule_once(lambda dt: self._set_status("Все 17 частей готовы. Собираем общий архив…"), 0)
-                assembly_name = "." + BASE_ASSET + ".assembling"
+                assembly_name = BASE_ASSET + ".assembling"
                 assembly = find(folder, assembly_name)
                 state_path = os.path.join(self.user_data_dir, "base_saf_state.json")
                 state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": hashes}
@@ -1084,7 +1084,7 @@ class UpdaterApp(App):
                 # SAF swap: retain the previous archive as a backup until the new
                 # file has been renamed and verified.
                 old_base = find(folder, BASE_ASSET)
-                backup_name = "." + BASE_ASSET + ".backup"
+                backup_name = BASE_ASSET + ".backup"
                 backup = find(folder, backup_name)
                 if backup is not None and not self._saf_delete(resolver, Docs, backup):
                     raise RuntimeError("Не удалось освободить резервное имя для замены общего архива.")
@@ -1102,7 +1102,7 @@ class UpdaterApp(App):
                 final_size, final_md5 = self._saf_hash_size(resolver, final_uri)
                 if final_size != base_size or final_md5 != assembled_md5:
                     if not self._saf_delete(resolver, Docs, final_uri):
-                        failed_name = "." + BASE_ASSET + ".failed"
+                        failed_name = BASE_ASSET + ".failed"
                         if find(folder, failed_name) is not None:
                             failed_name = failed_name + ".2"
                         failed_uri = Docs.renameDocument(resolver, final_uri, failed_name)
@@ -1139,7 +1139,7 @@ class UpdaterApp(App):
             for item in extras:
                 name = item["name"]
                 Clock.schedule_once(
-                    lambda dt, n=name: self._download_status("Дополнительный архив: {}".format(n)), 0
+                    lambda dt, n=name: self._download_status("Дополнительный архив: {}".format(n + ".download")), 0
                 )
                 temp_name = "." + name + ".download"
                 temp = find(folder, temp_name)
@@ -1221,7 +1221,7 @@ class UpdaterApp(App):
                             digest.update(data)
                             got += len(data)
                             pct = 85.0 + 15.0 * (extra_done + got - offset) / extra_total
-                            Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n, r), 0)
+                            Clock.schedule_once(lambda dt, p=pct, n=name, r=got: self._download_progress(p, n + ".download", r), 0)
                     out.flush()
                 finally:
                     out.close()
