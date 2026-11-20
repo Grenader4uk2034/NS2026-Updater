@@ -818,40 +818,18 @@ class UpdaterApp(App):
                     expected_hash = item["expected_md5"].lower()
                     offset = self._saf_size(resolver, part) if part is not None else 0
     
-                    # Reuse already-downloaded split files under their original names.
-                    # Only verified files are reused; bad originals are not overwritten.
-                    if part is None:
-                        original_part = find(folder, name)
-                        if original_part is not None:
-                            original_size = self._saf_size(resolver, original_part)
-                            if original_size == expected_size:
-                                try:
-                                    original_valid = (
-                                        self._cached_verified(resolver, original_part, name, expected_size, expected_hash)
-                                        or self._saf_md5(resolver, original_part).lower() == expected_hash
-                                    )
-                                except Exception:
-                                    original_valid = False
-                                if original_valid:
-                                    self._remember_verified(resolver, original_part, name, expected_size, expected_hash, expected_hash)
-                                    part_uris.append(original_part)
-                                    downloaded_bytes += expected_size
-                                    pct = 10.0 + 55.0 * downloaded_bytes / max(1, base_size)
-                                    Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
-                                    Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
-                                    continue
-    
+                    # Prefer a verified temporary piece; if incomplete/corrupt, check the original.
+                    part_valid = False
                     if offset == expected_size and expected_size > 0:
                         try:
-                            if self._cached_verified(resolver, part, name, expected_size, expected_hash):
-                                part_valid = True
-                            else:
-                                part_valid = self._saf_md5(resolver, part).lower() == expected_hash
-                                if part_valid:
-                                    self._remember_verified(resolver, part, name, expected_size, expected_hash, expected_hash)
+                            part_valid = (
+                                self._cached_verified(resolver, part, name, expected_size, expected_hash)
+                                or self._saf_md5(resolver, part).lower() == expected_hash
+                            )
                         except Exception:
                             part_valid = False
                         if part_valid:
+                            self._remember_verified(resolver, part, name, expected_size, expected_hash, expected_hash)
                             part_uris.append(part)
                             temporary_part_uris.append(part)
                             downloaded_bytes += expected_size
@@ -859,7 +837,33 @@ class UpdaterApp(App):
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
                             Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
                             continue
-                        # Invalid file is overwritten in place, never duplicated.
+
+                    # Check original split file even if a stale temp file exists.
+                    original_part = find(folder, name)
+                    if original_part is not None:
+                        original_size = self._saf_size(resolver, original_part)
+                        if original_size == expected_size:
+                            try:
+                                original_valid = (
+                                    self._cached_verified(resolver, original_part, name, expected_size, expected_hash)
+                                    or self._saf_md5(resolver, original_part).lower() == expected_hash
+                                )
+                            except Exception:
+                                original_valid = False
+                            if original_valid:
+                                self._remember_verified(resolver, original_part, name, expected_size, expected_hash, expected_hash)
+                                part_uris.append(original_part)
+                                if part is not None:
+                                    temporary_part_uris.append(part)
+                                downloaded_bytes += expected_size
+                                pct = 10.0 + 55.0 * downloaded_bytes / max(1, base_size)
+                                Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
+                                Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
+                                continue
+
+                    # Neither candidate is valid: continue/resume download into temp.
+                    offset = self._saf_size(resolver, part) if part is not None else 0
+                    if offset > expected_size:
                         offset = 0
     
                     if offset > expected_size:
