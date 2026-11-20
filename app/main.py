@@ -803,6 +803,8 @@ class UpdaterApp(App):
                 # Stage 1: download and validate all 17 pieces. Keep every valid piece
                 # until the assembled archive has been verified successfully.
                 downloaded_bytes = 0
+                part_uris = []
+                temporary_part_uris = []
                 for idx, item in enumerate(chunks):
                     name = item["name"]
                     Clock.schedule_once(
@@ -816,6 +818,29 @@ class UpdaterApp(App):
                     expected_hash = item["expected_md5"].lower()
                     offset = self._saf_size(resolver, part) if part is not None else 0
     
+                    # Reuse already-downloaded split files under their original names.
+                    # Only verified files are reused; bad originals are not overwritten.
+                    if part is None:
+                        original_part = find(folder, name)
+                        if original_part is not None:
+                            original_size = self._saf_size(resolver, original_part)
+                            if original_size == expected_size:
+                                try:
+                                    original_valid = (
+                                        self._cached_verified(resolver, original_part, name, expected_size, expected_hash)
+                                        or self._saf_md5(resolver, original_part).lower() == expected_hash
+                                    )
+                                except Exception:
+                                    original_valid = False
+                                if original_valid:
+                                    self._remember_verified(resolver, original_part, name, expected_size, expected_hash, expected_hash)
+                                    part_uris.append(original_part)
+                                    downloaded_bytes += expected_size
+                                    pct = 10.0 + 55.0 * downloaded_bytes / max(1, base_size)
+                                    Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
+                                    Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
+                                    continue
+    
                     if offset == expected_size and expected_size > 0:
                         try:
                             if self._cached_verified(resolver, part, name, expected_size, expected_hash):
@@ -827,6 +852,8 @@ class UpdaterApp(App):
                         except Exception:
                             part_valid = False
                         if part_valid:
+                            part_uris.append(part)
+                            temporary_part_uris.append(part)
                             downloaded_bytes += expected_size
                             pct = 10.0 + 55.0 * downloaded_bytes / max(1, base_size)
                             Clock.schedule_once(lambda dt, p=pct, n=name, r=expected_size: self._download_progress(p, n, r), 0)
@@ -922,21 +949,22 @@ class UpdaterApp(App):
                 if digest.hexdigest().lower() != expected_hash:
                     raise RuntimeError("MD5 части {} не совпал. Повреждённая часть оставлена до следующей проверки.".format(name))
                 self._remember_verified(resolver, part, name, expected_size, expected_hash, expected_hash)
+                part_uris.append(part)
+                temporary_part_uris.append(part)
                 downloaded_bytes += expected_size
                 Clock.schedule_once(lambda dt, i=idx+1: self._set_status("Проверено частей: {}/17".format(i)), 0)
     
                 # Recheck the entire set before assembly so no unchecked piece enters
-                # the final archive.
-                part_uris = []
+                # the final archive. Original verified pieces are also retained.
                 for idx, item in enumerate(chunks):
                     Clock.schedule_once(
                         lambda dt, i=idx + 1, n=item["name"]: self._download_status(
                             "Контроль частей {}/17: {}".format(i, n)
                         ), 0
                     )
-                    part_uri = find(folder, "." + item["name"] + ".download")
+                    part_uri = part_uris[idx]
                     if part_uri is None:
-                        raise RuntimeError("Не найдена скачанная часть " + item["name"])
+                        raise RuntimeError("Не найдена проверенная часть " + item["name"])
                     size = self._saf_size(resolver, part_uri)
                     expected_hash = item["expected_md5"].lower()
                     if size != int(item.get("size") or 0):
@@ -946,7 +974,6 @@ class UpdaterApp(App):
                         if digest.lower() != expected_hash:
                             raise RuntimeError("Повторная проверка части {} не пройдена.".format(item["name"]))
                         self._remember_verified(resolver, part_uri, item["name"], size, digest, expected_hash)
-                    part_uris.append(part_uri)
     
                 # Stage 2: append verified chunks into a temporary assembly. Chunks
                 # are retained; checkpoints are written only after each append closes.
@@ -1094,8 +1121,8 @@ class UpdaterApp(App):
                 Clock.schedule_once(
                     lambda dt: self._download_status("Архив проверен. Очистка временных частей…"), 0
                 )
-                for idx, item in enumerate(chunks):
-                    self._saf_delete(resolver, Docs, part_uris[idx])
+                for part_uri in temporary_part_uris:
+                    self._saf_delete(resolver, Docs, part_uri)
                 if backup is not None:
                     self._saf_delete(resolver, Docs, backup)
     
