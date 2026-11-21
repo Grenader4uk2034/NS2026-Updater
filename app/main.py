@@ -1376,7 +1376,6 @@ class UpdaterApp(App):
             folder_state["files"][BASE_ASSET] = {
                 "expected_size": base_size,
                 "actual_size": base_final_size,
-                ,
                 "status": "verified",
                 "parts": list(CHUNK_NAMES)
             }
