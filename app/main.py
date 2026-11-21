@@ -912,150 +912,44 @@ class UpdaterApp(App):
     def _check_worker(self):
         try:
             manifest = self._metadata_fetch("manifest", MANIFEST_URL, "application/json", ttl=600)
-
-            base_entry = next(
-                (entry for entry in manifest.get("base_files", [])
-                 if " gamedata.sq_base" in entry),
-                None,
-            )
+            base_entry = next((entry for entry in manifest.get("base_files", []) if " gamedata.sq_base" in entry), None)
             if not base_entry or not base_entry.startswith("chunk:"):
                 raise RuntimeError("В index.json не найдены метаданные 17 частей gamedata.sq_base.")
             metadata = base_entry[len("chunk:"):].rsplit(" ", 1)[0]
-            id_text, hash_text = metadata.split(";", 1)
-            chunk_ids = [value.strip() for value in id_text.split(",")]
-            chunk_hashes = [value.strip().lower() for value in hash_text.split(",")]
-            if len(chunk_ids) != BASE_CHUNK_COUNT or len(chunk_hashes) != BASE_CHUNK_COUNT:
-                raise RuntimeError("В манифесте должно быть ровно 17 ID и 17 MD5.")
-            if any(len(value) != 32 for value in chunk_hashes):
-                raise RuntimeError("Манифест содержит некорректную MD5 одной из частей.")
-
-            expected_hashes = {}
-            for entry in manifest.get("update_files", []):
-                parts = entry.split(" ", 1)
-                if len(parts) != 2:
-                    continue
-                hashes = parts[0].split(";")
-                filename = parts[1].replace("\\\\", "/").split("/")[-1]
-                if filename in REQUIRED_ASSETS[1:] and hashes:
-                    digest = hashes[0].lower()
-                    if len(digest) == 32 and len(hashes) > 1 and hashes[1].lower() == digest:
-                        expected_hashes[filename] = digest
-            missing_hashes = [name for name in REQUIRED_ASSETS[1:] if name not in expected_hashes]
-            if missing_hashes:
-                raise RuntimeError("В index.json отсутствуют корректные MD5: " + ", ".join(missing_hashes))
-
+            chunk_ids = [value.strip() for value in metadata.split(";", 1)[0].split(",")]
+            if len(chunk_ids) != BASE_CHUNK_COUNT:
+                raise RuntimeError("В манифесте должно быть ровно 17 ID частей.")
             release = self._metadata_fetch("release", RELEASE_API, "application/vnd.github+json", ttl=600)
             if release.get("tag_name") != RELEASE_TAG:
                 raise RuntimeError("GitHub вернул неожиданный релиз.")
-
             release_assets = {item.get("name"): item for item in release.get("assets", [])}
-            missing_chunks = [name for name in CHUNK_NAMES if name not in release_assets]
-            missing_extra = [name for name in REQUIRED_ASSETS[1:] if name not in release_assets]
-            if missing_chunks or missing_extra:
-                missing = missing_chunks + missing_extra
+            missing = [name for name in CHUNK_NAMES + REQUIRED_ASSETS[1:] if name not in release_assets]
+            if missing:
                 raise RuntimeError("В релизе latest отсутствуют файлы: " + ", ".join(missing))
-
             chunks = []
             for index, name in enumerate(CHUNK_NAMES):
                 item = dict(release_assets[name])
-                item["expected_md5"] = chunk_hashes[index]
-                item["expected_sha256"] = (item.get("digest") or "").replace("sha256:", "").lower()
                 item["chunk_index"] = index
                 chunks.append(item)
-
             if not self.tree_uri:
                 raise RuntimeError('Сначала выберите папку Download, чтобы проверить целевые архивы.')
             resolver, Docs, tree, folder, find = self._saf_target()
-            state_path = os.path.join(self.user_data_dir, 'base_saf_state.json')
+            base_size = sum(int(item.get("size") or 0) for item in chunks)
             base_uri = find(folder, BASE_ASSET)
-            assembled_md5 = None
-            base_size = sum(int(item.get('size') or 0) for item in chunks)
-            # Hash checks are disabled: a correctly sized assembled archive is accepted.
-            if base_uri is not None and self._saf_size(resolver, base_uri) == base_size:
-                assembled_md5 = None
-            base_asset = {"name": BASE_ASSET, "size": base_size, "chunks": chunks, "expected_md5": None, "assembled_md5": None, "downloaded": bool(base_uri is not None and self._saf_size(resolver, base_uri) == base_size)}
-            found = {BASE_ASSET: base_asset}
-            cache_snapshot = self._load_verification_cache()
-            # The Download-folder JSON is a second cache layer. Trust it only when
-            # the SAF URI, size, modified fingerprint and expected MD5 still match.
-            folder_state = self._load_folder_state(resolver, find, folder)
-            for state_name, state_entry in folder_state.get("files", {}).items():
-                if state_entry.get("status") != "verified":
-                    continue
-                state_uri = state_entry.get("uri")
-                if not state_uri:
-                    continue
-                try:
-                    state_doc = find(folder, state_name)
-                    if state_doc is None or str(state_doc) != state_uri:
-                        continue
-                    size_now = self._saf_size(resolver, state_doc)
-                    modified_now = self._saf_modified(resolver, state_doc)
-                    if size_now == int(state_entry.get("actual_size", -1)) and modified_now == state_entry.get("modified"):
-                        cache_snapshot[state_name] = {
-                            "uri": state_uri, "size": size_now, "modified": modified_now,
-                            "expected_md5": None, "md5": None
-                        }
-                except Exception:
-                    pass
-            check_jobs = []
+            found = {BASE_ASSET: {"name": BASE_ASSET, "size": base_size, "chunks": chunks, "downloaded": bool(base_uri is not None and self._saf_size(resolver, base_uri) == base_size)}}
             for name in REQUIRED_ASSETS[1:]:
                 item = dict(release_assets[name])
-                item["expected_md5"] = expected_hashes[name]
-                item["expected_sha256"] = (item.get("digest") or "").replace("sha256:", "").lower()
                 existing = find(folder, name)
-                item["downloaded"] = False
+                try:
+                    item["downloaded"] = bool(existing is not None and self._saf_size(resolver, existing) == int(item.get("size") or 0))
+                except Exception:
+                    item["downloaded"] = False
                 found[name] = item
-                if existing is not None:
-                    try:
-                        actual_size = self._saf_size(resolver, existing)
-                        if actual_size == int(item.get("size") or 0):
-                            check_jobs.append((name, item, existing, actual_size))
-                    except Exception:
-                        pass
-            # Adaptive verification: scale with CPU count, capped at 3 for SAF/storage safety.
-            worker_count = min(4, max(1, (os.cpu_count() or 2) - 1), len(check_jobs)) if check_jobs else 1
-            checked = {}
-            total_check_bytes = sum(size for name, item, uri, size in check_jobs)
-            progress_lock = threading.Lock()
-            progress_state = {"bytes": 0, "last_ui": 0.0}
-            def hash_progress(name, amount):
-                now = time.monotonic()
-                with progress_lock:
-                    progress_state["bytes"] += amount
-                    done = progress_state["bytes"]
-                    if now - progress_state["last_ui"] < 0.15 and done < total_check_bytes:
-                        return
-                    progress_state["last_ui"] = now
-                percent = 100.0 * done / max(1, total_check_bytes)
-                Clock.schedule_once(lambda dt, p=percent, n=name: (
-                    self._set_progress(p),
-                    self._set_status("Проверка MD5 архивов: {:.1f}% • {}".format(p, n))
-                ), 0)
-            with ThreadPoolExecutor(max_workers=worker_count) as pool:
-                futures = [
-                    pool.submit(self._verify_existing_asset, resolver, uri, name, size, item["expected_md5"], cache_snapshot,
-                               lambda amount, n=name: hash_progress(n, amount))
-                    for name, item, uri, size in check_jobs
-                ]
-                for future in as_completed(futures):
-                    name, valid, digest = future.result()
-                    checked[name] = (valid, digest)
-            for name, item, existing, actual_size in check_jobs:
-                valid, digest = checked.get(name, (False, None))
-                item["downloaded"] = valid
-                if valid and digest:
-                    self._remember_verified(resolver, existing, name, actual_size, digest, item["expected_md5"])
             self.release = release
             self.assets = found
-            total = sum(item["size"] for item in found.values())
-            pending = sum(item["size"] for item in found.values() if not item["downloaded"])
-            if pending > 0:
-                message = "Хабар обнаружен!\nВес хабара: {}".format(format_size(pending))
-                signal_state = "online"
-            else:
-                message = "В Зоне затишье.\nВсе архивы уже на месте."
-                signal_state = "idle"
+            pending = sum(int(item.get("size") or 0) for item in found.values() if not item["downloaded"])
+            message = ("Хабар обнаружен!\\nВес хабара: {}".format(format_size(pending)) if pending else "В Зоне затишье.\\nВсе архивы уже на месте.")
+            signal_state = "online" if pending else "idle"
             Clock.schedule_once(lambda dt, m=message, st=signal_state: self._check_done(m, st), 0)
         except Exception as exc:
             if hasattr(self, "logger"): self.logger.exception("ОШИБКА проверки обновлений")
