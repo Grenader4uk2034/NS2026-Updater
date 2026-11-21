@@ -1304,11 +1304,11 @@ class UpdaterApp(App):
                         Docs.renameDocument(resolver, backup, BASE_ASSET)
                     raise RuntimeError("Проверка общего архива после сохранения не пройдена. Части сохранены.")
 
-                self._save_chunk_state(state_path, {
-                    "complete": True,
-                    "chunk_names": chunk_names,
-                    "assembled_size": assembled_size,
-                })
+                self._save_chunk_state(state_path, dict(
+                    complete=True,
+                    chunk_names=chunk_names,
+                    assembled_size=assembled_size
+                ))
                 self._remember_verified(resolver, final_uri, BASE_ASSET, assembled_size, assembled_md5, assembled_md5)
                 base["downloaded"] = True
                 base["assembled_md5"] = assembled_md5
