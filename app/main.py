@@ -1230,7 +1230,7 @@ class UpdaterApp(App):
                         raise RuntimeError("Не удалось создать промежуточный общий архив.")
                     next_chunk = 0
                     committed = 0
-                    state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": hashes, "complete": False}
+                    state = {"next_chunk": 0, "committed_bytes": 0, "chunk_names": chunk_names, "complete": False}
                     self._save_chunk_state(state_path, state)
 
                 buf = Array.newInstance(Byte.TYPE, READ_BLOCK)
