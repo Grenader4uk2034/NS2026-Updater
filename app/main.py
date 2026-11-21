@@ -1263,7 +1263,7 @@ class UpdaterApp(App):
                     state = {
                         "next_chunk": idx + 1,
                         "committed_bytes": committed,
-                        "chunks_md5": hashes,
+                        "chunk_names": chunk_names,
                         "complete": False,
                     }
                     self._save_chunk_state(state_path, state)
@@ -1306,7 +1306,7 @@ class UpdaterApp(App):
 
                 self._save_chunk_state(state_path, {
                     "complete": True,
-                    "chunks_md5": hashes,
+                    "chunk_names": chunk_names,
                     ,
                     "assembled_size": assembled_size,
                 })
