@@ -1060,7 +1060,7 @@ class UpdaterApp(App):
         except Exception as exc:
             if hasattr(self, "logger"): self.logger.exception("ОШИБКА проверки обновлений")
             error = friendly_network_error(exc)
-            Clock.schedule_once(lambda dt, e=error: self._check_failed(e), 0
+            Clock.schedule_once(lambda dt, e=error: self._check_failed(e), 0)
 
     def _check_done(self, message, signal_state="online"):
         pending = any(not item.get("downloaded") for item in self.assets.values())
