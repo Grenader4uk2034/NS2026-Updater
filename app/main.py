@@ -970,22 +970,10 @@ class UpdaterApp(App):
             base_uri = find(folder, BASE_ASSET)
             assembled_md5 = None
             base_size = sum(int(item.get('size') or 0) for item in chunks)
-            if base_uri is not None and os.path.isfile(state_path):
-                try:
-                    with open(state_path, "r", encoding="utf-8") as sf:
-                        saved = json.load(sf)
-                    if saved.get("complete") and saved.get("chunks_md5") == chunk_hashes and self._saf_size(resolver, base_uri) == base_size:
-                        cached_digest = saved.get("assembled_md5")
-                        if cached_digest and self._cached_verified(resolver, base_uri, BASE_ASSET, base_size, cached_digest):
-                            assembled_md5 = cached_digest
-                        else:
-                            actual = self._saf_md5(resolver, base_uri)
-                            if actual == cached_digest:
-                                assembled_md5 = actual
-                                self._remember_verified(resolver, base_uri, BASE_ASSET, base_size, actual, actual)
-                except Exception:
-                    assembled_md5 = None
-            base_asset = {"name": BASE_ASSET, "size": base_size, "chunks": chunks, "expected_md5": assembled_md5, "assembled_md5": assembled_md5, "downloaded": bool(assembled_md5)}
+            # Hash checks are disabled: a correctly sized assembled archive is accepted.
+            if base_uri is not None and self._saf_size(resolver, base_uri) == base_size:
+                assembled_md5 = None
+            base_asset = {"name": BASE_ASSET, "size": base_size, "chunks": chunks, "expected_md5": None, "assembled_md5": None, "downloaded": bool(base_uri is not None and self._saf_size(resolver, base_uri) == base_size)}
             found = {BASE_ASSET: base_asset}
             cache_snapshot = self._load_verification_cache()
             # The Download-folder JSON is a second cache layer. Trust it only when
@@ -994,10 +982,8 @@ class UpdaterApp(App):
             for state_name, state_entry in folder_state.get("files", {}).items():
                 if state_entry.get("status") != "verified":
                     continue
-                expected = state_entry.get("expected_md5")
-                verified = state_entry.get("verified_md5")
                 state_uri = state_entry.get("uri")
-                if not expected or expected != verified or not state_uri:
+                if not state_uri:
                     continue
                 try:
                     state_doc = find(folder, state_name)
@@ -1008,7 +994,7 @@ class UpdaterApp(App):
                     if size_now == int(state_entry.get("actual_size", -1)) and modified_now == state_entry.get("modified"):
                         cache_snapshot[state_name] = {
                             "uri": state_uri, "size": size_now, "modified": modified_now,
-                            "expected_md5": expected, "md5": verified
+                            "expected_md5": None, "md5": None
                         }
                 except Exception:
                     pass
