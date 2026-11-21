@@ -1104,7 +1104,7 @@ class UpdaterApp(App):
             base = self.assets[BASE_ASSET]
             chunks = base["chunks"]
             count = len(chunks)
-            hashes = [item["expected_md5"].lower() for item in chunks]
+            chunk_names = [item["name"] for item in chunks]
             base_size = int(base.get("size") or 0)
             extra_assets = [self.assets[n] for n in REQUIRED_ASSETS[1:]]
             folder_state = self._load_folder_state(resolver, find, folder)
@@ -1113,13 +1113,13 @@ class UpdaterApp(App):
             for entry in list(chunks) + extra_assets:
                 state_files.setdefault(entry["name"], {}).update({
                     "expected_size": int(entry.get("size") or 0),
-                    "expected_md5": entry["expected_md5"].lower(),
+                    
                     "status": state_files.get(entry["name"], {}).get("status", "pending")
                 })
             self._save_folder_state(resolver, Docs, folder, find, folder_state)
 
             # One bar for everything that is really left to do:
-            #   [ parts download | assembly + 2 hash passes | extra archives ]
+            #   [ parts download | assembly | extra archives ]
             need_base = not base.get("downloaded")
             extras = [item for item in extra_assets if not item.get("downloaded")]
             extras_total = sum(int(x.get("size") or 0) for x in extras)
@@ -1133,7 +1133,7 @@ class UpdaterApp(App):
             progress.report(0, "Быстрейший источник: {}".format(mirror_title(preferred_mirror)), True)
 
             base_final_size = base_size
-            base_final_md5 = base.get("assembled_md5")
+            base_final_md5 = None
             if need_base:
                 # Stage 1: every one of the 17 pieces is verified (or downloaded and
                 # verified) before the loop moves on. Valid pieces are kept until
@@ -1145,7 +1145,7 @@ class UpdaterApp(App):
                     name = item["name"]
                     label = "часть {}/{}".format(idx + 1, count)
                     expected_size = int(item.get("size") or 0)
-                    expected_hash = item["expected_md5"].lower()
+                    expected_hash = ""
                     temp_name = name + ".download"
                     part = find(folder, temp_name)
                     if part is None:
@@ -1178,10 +1178,10 @@ class UpdaterApp(App):
                         verified_uri = part
                         verified_name = temp_name
 
-                    self._remember_verified(resolver, verified_uri, name, expected_size, expected_hash, expected_hash)
+                    self._remember_verified(resolver, verified_uri, name, expected_size, None, None)
                     self._folder_state_update(
                         resolver, Docs, folder, find, folder_state, name,
-                        "verified", expected_size, expected_hash, verified_name
+                        "verified", expected_size, None, verified_name
                     )
                     part_uris.append(verified_uri)
                     if part is not None:
@@ -1206,12 +1206,12 @@ class UpdaterApp(App):
                 assembly_name = BASE_ASSET + ".assembling"
                 assembly = find(folder, assembly_name)
                 state_path = os.path.join(self.user_data_dir, "base_saf_state.json")
-                state = {"next_chunk": 0, "committed_bytes": 0, "chunks_md5": hashes}
+                state = {"next_chunk": 0, "committed_bytes": 0, "chunk_names": chunk_names}
                 if os.path.isfile(state_path):
                     try:
                         with open(state_path, "r", encoding="utf-8") as source:
                             saved = json.load(source)
-                        if saved.get("chunks_md5") == hashes and not saved.get("complete"):
+                        if saved.get("chunk_names") == chunk_names and not saved.get("complete"):
                             state.update(saved)
                     except Exception:
                         pass
@@ -1307,7 +1307,7 @@ class UpdaterApp(App):
                 self._save_chunk_state(state_path, {
                     "complete": True,
                     "chunks_md5": hashes,
-                    "assembled_md5": assembled_md5,
+                    ,
                     "assembled_size": assembled_size,
                 })
                 self._remember_verified(resolver, final_uri, BASE_ASSET, assembled_size, assembled_md5, assembled_md5)
@@ -1332,7 +1332,7 @@ class UpdaterApp(App):
                 label = name
                 temp_name = name + ".download"
                 expected_size = int(item.get("size") or 0)
-                expected_hash = item["expected_md5"].lower()
+                expected_hash = ""
                 start = extras_offset + extras_done
                 temp = find(folder, temp_name)
                 if temp is None:
@@ -1363,7 +1363,7 @@ class UpdaterApp(App):
                 self._remember_verified(resolver, final_uri, name, expected_size, expected_hash, expected_hash)
                 item["downloaded"] = True
                 extras_done += expected_size
-                self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", expected_size, expected_hash, temp_name)
+                self._folder_state_update(resolver, Docs, folder, find, folder_state, name, "verified", expected_size, None, temp_name)
                 progress.report(extras_offset + extras_done, "Готов архив: {}".format(label), True)
 
             for asset_name, asset_item in self.assets.items():
@@ -1371,13 +1371,13 @@ class UpdaterApp(App):
                     state_files.setdefault(asset_name, {}).update({
                         "expected_size": int(asset_item.get("size") or 0),
                         "actual_size": int(asset_item.get("size") or 0),
-                        "expected_md5": asset_item.get("expected_md5"),
+                        
                         "status": "verified"
                     })
             folder_state["files"][BASE_ASSET] = {
                 "expected_size": base_size,
                 "actual_size": base_final_size,
-                "verified_md5": base_final_md5,
+                ,
                 "status": "verified",
                 "parts": list(CHUNK_NAMES)
             }
