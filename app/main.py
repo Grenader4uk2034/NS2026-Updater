@@ -585,8 +585,8 @@ class UpdaterApp(App):
             "uri": str(uri),
             "size": int(size),
             "modified": modified,
-            "md5": digest.lower(),
-            "expected_md5": expected_md5.lower(),
+            "md5": digest.lower() if digest else None,
+            "expected_md5": expected_md5.lower() if expected_md5 else None,
         }
         self._save_verification_cache(cache)
 
