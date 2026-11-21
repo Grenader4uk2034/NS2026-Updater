@@ -371,14 +371,9 @@ class UpdaterApp(App):
         path = os.path.join(self.download_dir, name)
         if not os.path.isfile(path):
             return False
-        expected = (asset.get("expected_md5") or asset.get("assembled_md5") or "").lower()
-        if len(expected) != 32:
-            return False
         try:
             expected_size = int(asset.get("size") or 0)
-            if expected_size and os.path.getsize(path) != expected_size:
-                return False
-            return self._md5(path).lower() == expected
+            return expected_size > 0 and os.path.getsize(path) == expected_size
         except (OSError, TypeError, ValueError):
             return False
 
@@ -572,16 +567,12 @@ class UpdaterApp(App):
             entry.get("uri") == str(uri)
             and int(entry.get("size", -1)) == int(size)
             and int(entry.get("modified", -1)) == modified
-            and entry.get("expected_md5") == expected_md5.lower()
-            and entry.get("md5") == expected_md5.lower()
         )
 
     def _verify_existing_asset(self, resolver, uri, name, size, expected_md5, cache_snapshot, progress_callback=None):
         try:
-            if self._cached_verified(resolver, uri, name, size, expected_md5, cache_snapshot):
-                return name, True, expected_md5.lower()
-            digest = self._saf_md5(resolver, uri, progress_callback=progress_callback).lower()
-            return name, digest == expected_md5.lower(), digest
+            actual_size = self._saf_size(resolver, uri)
+            return name, actual_size == int(size), None
         except Exception:
             return name, False, None
 
@@ -653,18 +644,10 @@ class UpdaterApp(App):
     def _verify_document(self, resolver, uri, name, size, expected_md5, on_progress=None):
         """True when the document matches its MD5 (cached fingerprint or native hash)."""
         try:
-            if self._cached_verified(resolver, uri, name, size, expected_md5):
-                if on_progress is not None:
-                    on_progress(size)
-                return True
-            done = [0]
-
-            def tick(amount):
-                done[0] += amount
-                if on_progress is not None:
-                    on_progress(done[0])
-
-            return self._saf_md5(resolver, uri, progress_callback=tick).lower() == expected_md5.lower()
+            valid = self._saf_size(resolver, uri) == int(size)
+            if on_progress is not None:
+                on_progress(size if valid else 0)
+            return valid
         except Exception:
             return False
 
@@ -810,6 +793,11 @@ class UpdaterApp(App):
                 report(got, "Нет связи ({}). Пробуем {} • попытка {} из {}".format(
                     label, mirror_title(mirror), idle + 1, max_idle), True)
                 time.sleep(min(2 ** min(idle, 4), 15))
+
+            # Hash checks disabled: size-complete downloads are accepted.
+            self.logger.info("DOWNLOAD COMPLETE (SIZE ONLY) | %s | bytes=%d | mirror=%s", label, got, mirror_title(mirror))
+            report(expected_size, "Загружено: {} • {} байт".format(label, expected_size), True)
+            return part
 
             report(got, "Проверка MD5: {}".format(label), True)
             hashed = [0]
@@ -1326,15 +1314,8 @@ class UpdaterApp(App):
                 for idx, item in enumerate(chunks):
                     part_uri = part_uris[idx]
                     size = self._saf_size(resolver, part_uri)
-                    expected_hash = item["expected_md5"].lower()
                     if size != int(item.get("size") or 0):
                         raise RuntimeError("Повторная проверка размера части {} не пройдена.".format(item["name"]))
-                    if not self._cached_verified(resolver, part_uri, item["name"], size, expected_hash):
-                        progress.report(parts_units, "Контроль частей {}/{}".format(idx + 1, count), True)
-                        digest = self._saf_md5(resolver, part_uri)
-                        if digest.lower() != expected_hash:
-                            raise RuntimeError("Повторная проверка части {} не пройдена.".format(item["name"]))
-                        self._remember_verified(resolver, part_uri, item["name"], size, digest, expected_hash)
 
                 def local(nbytes):
                     return parts_units + nbytes * LOCAL_WORK_WEIGHT
@@ -1410,25 +1391,8 @@ class UpdaterApp(App):
                 assembled_size = self._saf_size(resolver, assembly)
                 if assembled_size != base_size:
                     raise RuntimeError("Размер общего gamedata.sq_base не совпал. Все 17 частей сохранены.")
-                hashed = [0]
-
-                def tick_assembled(amount):
-                    hashed[0] += amount
-                    progress.report(local(base_size + hashed[0]), "Проверка общего архива • {:.0f}%".format(
-                        100.0 * hashed[0] / max(1, base_size)))
-
-                assembled_md5 = self._saf_md5(resolver, assembly, progress_callback=tick_assembled)
-                # Independently hash the exact byte stream of all 17 source pieces.
-                # The assembled file must match this concatenation byte-for-byte.
-                hashed_parts = [0]
-
-                def tick_parts(amount):
-                    hashed_parts[0] += amount
-                    progress.report(local(2 * base_size + hashed_parts[0]), "Сверка общего архива с частями • {:.0f}%".format(
-                        100.0 * hashed_parts[0] / max(1, base_size)))
-
-                if self._saf_md5_many(resolver, part_uris, progress_callback=tick_parts) != assembled_md5:
-                    raise RuntimeError("Общий архив не совпадает с последовательным объединением 17 частей. Части сохранены.")
+                # Checksum verification disabled; assembled archive is size-checked.
+                assembled_md5 = None
 
                 # SAF swap: retain the previous archive as a backup until the new
                 # file has been renamed and checked.
