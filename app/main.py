@@ -1493,7 +1493,7 @@ class UpdaterApp(App):
         except Exception as exc:
             if hasattr(self, "logger"): self.logger.exception("КРИТИЧЕСКАЯ ОШИБКА загрузки/сборки")
             error = friendly_network_error(exc)
-            Clock.schedule_once(lambda dt, e=error: self._download_failed(e), 0
+            Clock.schedule_once(lambda dt, e=error: self._download_failed(e), 0)
 
     def _download_status(self, message):
         self._set_status(message)
