@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 import hashlib
+import logging
+import traceback
 import http.client
 import json
 import os
@@ -238,8 +240,21 @@ class WideProgress(FloatLayout):
 
 
 class UpdaterApp(App):
+    def _setup_logging(self):
+        log_path = os.path.join(self.user_data_dir, "updater_full.log")
+        self.logger = logging.getLogger("NS2026Updater")
+        self.logger.setLevel(logging.DEBUG)
+        self.logger.propagate = False
+        if not self.logger.handlers:
+            handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+            handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(threadName)s | %(message)s"))
+            self.logger.addHandler(handler)
+        self.logger.info("Log file: %s", log_path)
+
     def build(self):
         self.title = "NS2026 Updater"
+        self._setup_logging()
+        self.logger.info("=== NS2026 Updater старт === | version=diagnostic | android=%s", os.environ.get('ANDROID_ARGUMENT', 'unknown'))
         self.release = None
         self.assets = {}
         self.busy = False
@@ -677,9 +692,11 @@ class UpdaterApp(App):
         if got:
             headers["Range"] = "bytes={}-".format(got)
         request = urllib.request.Request(mirror_url(url, mirror), headers=headers)
+        self.logger.info("HTTP REQUEST | %s | mirror=%s | offset=%d | url=%s", label, mirror_title(mirror), got, request.full_url)
         response = urllib.request.urlopen(request, timeout=60, context=NETWORK_CONTEXT)
         try:
             status = response.getcode()
+            self.logger.info("HTTP RESPONSE | %s | status=%s | content-length=%s | content-range=%s", label, status, response.headers.get("Content-Length"), response.headers.get("Content-Range"))
             length = (response.headers.get("Content-Length") or "").strip()
             if got:
                 content_range = (response.headers.get("Content-Range") or "").strip()
@@ -724,6 +741,8 @@ class UpdaterApp(App):
                         break
                     out.write(data)
                     got += len(data)
+                    if got - session_start and (got - session_start) % (64 * 1024 * 1024) < len(data):
+                        self.logger.debug("DOWNLOAD PROGRESS | %s | %d/%d bytes", label, got, expected_size)
                     elapsed = time.monotonic() - started
                     speed = (got - session_start) / elapsed if elapsed > 1 else 0
                     report(got, "Загрузка: {} • {} из {}{}".format(
@@ -747,6 +766,7 @@ class UpdaterApp(App):
             if part is None:
                 raise RuntimeError("Не удалось создать временный файл " + temp_name)
         got = self._saf_size(resolver, part)
+        self.logger.info("DOWNLOAD START | %s | size=%d | existing=%d | MD5=%s | SHA256=%s | url=%s", label, expected_size, got, expected_hash, expected_sha256, url)
         if got >= expected_size:
             # A full-size file reaching this point already failed MD5.
             part = self._saf_truncate(resolver, Docs, folder, part, temp_name)
@@ -767,6 +787,7 @@ class UpdaterApp(App):
                     )
                 except (OSError, http.client.HTTPException, MirrorMismatch) as exc:
                     error = exc
+                    self.logger.warning("STREAM ERROR | %s | mirror=%s | offset=%d | %s", label, mirror_title(mirror), got, repr(exc), exc_info=True)
                 # Resume from what is really on disk, not from what we counted.
                 got = self._saf_size(resolver, part)
                 if got > expected_size:
@@ -798,6 +819,7 @@ class UpdaterApp(App):
                 report(got, "Проверка MD5: {} • {:.0f}%".format(label, 100.0 * hashed[0] / max(1, expected_size)))
 
             actual_hash = self._saf_md5(resolver, part, progress_callback=on_hash).lower()
+            self.logger.info("HASH RESULT | %s | MD5 actual=%s expected=%s | bytes=%d | mirror=%s", label, actual_hash, expected_hash, self._saf_size(resolver, part), mirror_title(mirror))
             if actual_hash == expected_hash.lower():
                 report(expected_size, "MD5 совпал: {} • {} байт".format(label, expected_size), True)
                 return part
@@ -817,6 +839,7 @@ class UpdaterApp(App):
                     )
 
             hash_attempt += 1
+            self.logger.error("MD5 MISMATCH | %s | attempt=%d/%d | actual=%s | expected=%s | SHA256=%s | mirror=%s", label, hash_attempt, MAX_HASH_ATTEMPTS, actual_hash, expected_hash, actual_sha256, mirror_title(mirror))
             mismatch_detail = "MD5 не совпал: {} • фактически {} байт • MD5 {} • ожидалось {}".format(
                 label, self._saf_size(resolver, part), actual_hash, expected_hash.lower()
             )
@@ -1061,8 +1084,9 @@ class UpdaterApp(App):
                 signal_state = "idle"
             Clock.schedule_once(lambda dt, m=message, st=signal_state: self._check_done(m, st), 0)
         except Exception as exc:
+            if hasattr(self, "logger"): self.logger.exception("ОШИБКА проверки обновлений")
             error = friendly_network_error(exc)
-            Clock.schedule_once(lambda dt, e=error: self._check_failed(e), 0)
+            Clock.schedule_once(lambda dt, e=error: self._check_failed(e), 0
 
     def _check_done(self, message, signal_state="online"):
         pending = any(not item.get("downloaded") for item in self.assets.values())
@@ -1517,8 +1541,9 @@ class UpdaterApp(App):
             self._save_folder_state(resolver, Docs, folder, find, folder_state)
             Clock.schedule_once(lambda dt: self._download_done(), 0)
         except Exception as exc:
+            if hasattr(self, "logger"): self.logger.exception("КРИТИЧЕСКАЯ ОШИБКА загрузки/сборки")
             error = friendly_network_error(exc)
-            Clock.schedule_once(lambda dt, e=error: self._download_failed(e), 0)
+            Clock.schedule_once(lambda dt, e=error: self._download_failed(e), 0
 
     def _download_status(self, message):
         self._set_status(message)
