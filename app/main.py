@@ -1307,7 +1307,6 @@ class UpdaterApp(App):
                 self._save_chunk_state(state_path, {
                     "complete": True,
                     "chunk_names": chunk_names,
-                    ,
                     "assembled_size": assembled_size,
                 })
                 self._remember_verified(resolver, final_uri, BASE_ASSET, assembled_size, assembled_md5, assembled_md5)
